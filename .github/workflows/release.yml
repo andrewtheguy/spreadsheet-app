@@ -57,7 +57,8 @@ jobs:
           - platform: macos-latest
             args: ''
           - platform: windows-latest
-            args: ''
+            # Only build the MSI installer (overrides `targets: "all"` in tauri.conf.json).
+            args: '--bundles msi'
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
