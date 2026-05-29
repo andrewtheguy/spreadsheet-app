@@ -1,3 +1,4 @@
 - no backward compatibility
 - use project root tmp/ dir for test data
 - run cargo clippy after changes
+- desktop only for mac and windows, no mobile support
