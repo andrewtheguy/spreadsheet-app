@@ -5,9 +5,16 @@ import "./App.css";
 
 // The embedded Chromium (CEF) webview would otherwise navigate external links
 // inside the app, so route them to the OS default browser via a Rust command.
-function openExternal(e: MouseEvent<HTMLAnchorElement>) {
+async function openExternal(e: MouseEvent<HTMLAnchorElement>) {
   e.preventDefault();
-  invoke("open_external", { url: e.currentTarget.href });
+  // Capture the href before awaiting: React resets currentTarget after the handler.
+  const url = e.currentTarget.href;
+  try {
+    await invoke("open_external", { url });
+  } catch (err) {
+    console.error(`Failed to open ${url}:`, err);
+    alert(`Failed to open ${url}: ${err}`);
+  }
 }
 
 function App() {

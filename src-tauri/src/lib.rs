@@ -6,29 +6,27 @@ fn greet(name: &str) -> String {
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
 // links inside the embedded Chromium webview, so the frontend routes external links
-// here instead. Only http(s) URLs are allowed.
+// here instead.
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(format!("refusing to open non-http(s) URL: {url}"));
+    // The OS opener (ShellExecuteExW on Windows, `open(1)` on macOS) will launch *any*
+    // registered scheme, so parse and restrict to http(s) and reject embedded
+    // credentials / hostless URLs. `Url::parse` also rejects/percent-encodes control
+    // characters, so they never reach the opener.
+    let parsed = url::Url::parse(&url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("refusing to open non-http(s) URL: {url:?}"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("refusing to open URL with embedded credentials: {url:?}"));
+    }
+    if parsed.host().is_none() {
+        return Err(format!("refusing to open URL without a host: {url:?}"));
     }
 
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = std::process::Command::new("open");
-        c.arg(&url);
-        c
-    };
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        // The empty "" is the window title arg `start` expects before the URL.
-        c.args(["/C", "start", "", &url]);
-        c
-    };
-
-    command.spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    // `that_detached` never invokes a shell on any platform, so a query string like
+    // `?a=1&b=2` can't be reinterpreted as a command.
+    open::that_detached(parsed.as_str()).map_err(|e| e.to_string())
 }
 
 // `Builder::default()` resolves to the CEF runtime because the `cef` feature is enabled
