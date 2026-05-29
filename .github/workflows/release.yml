@@ -55,8 +55,8 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            # app + dmg only; excludes the `updater` target (the `.app.tar.gz`).
-            args: '--bundles app,dmg'
+            # DMG only. The standalone `app` bundle is uploaded as `.app.tar.gz`.
+            args: '--bundles dmg'
           - platform: windows-latest
             # Only build the MSI installer (overrides `targets: "all"` in tauri.conf.json).
             args: '--bundles msi'
