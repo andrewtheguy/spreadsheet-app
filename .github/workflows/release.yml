@@ -55,7 +55,8 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: ''
+            # app + dmg only; excludes the `updater` target (the `.app.tar.gz`).
+            args: '--bundles app,dmg'
           - platform: windows-latest
             # Only build the MSI installer (overrides `targets: "all"` in tauri.conf.json).
             args: '--bundles msi'
@@ -65,9 +66,6 @@ jobs:
 
       - name: setup bun
         uses: oven-sh/setup-bun@v2
-
-      - name: install Rust stable
-        uses: dtolnay/rust-toolchain@stable
 
       - name: rust cache
         uses: swatinem/rust-cache@v2
