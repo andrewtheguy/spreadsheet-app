@@ -33,16 +33,25 @@ async fn load_csv<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<
         .from_path(&path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
 
-    let headers = reader
+    let headers: Vec<String> = reader
         .headers()
         .map_err(|e| e.to_string())?
         .iter()
         .map(String::from)
         .collect();
 
+    // `flexible(true)` accepts ragged rows; normalize each to the header width (pad short
+    // rows with empty strings, truncate long ones) so cells stay aligned on the frontend.
+    let column_count = headers.len();
     let rows = reader
         .records()
-        .map(|record| record.map(|r| r.iter().map(String::from).collect()))
+        .map(|record| {
+            record.map(|r| {
+                let mut row: Vec<String> = r.iter().map(String::from).collect();
+                row.resize(column_count, String::new());
+                row
+            })
+        })
         .collect::<Result<Vec<Vec<String>>, _>>()
         .map_err(|e| e.to_string())?;
 
