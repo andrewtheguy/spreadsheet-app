@@ -1,0 +1,90 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Let the gh CLI resolve the repo/token in jobs without a checkout.
+  GH_REPO: ${{ github.repository }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  create-release:
+    name: Create draft prerelease
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Compute release tag
+        id: meta
+        run: |
+          set -euo pipefail
+          # yyyymmddhhmmss (UTC) + short git sha from the GITHUB_SHA env variable.
+          TAG="$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Create draft prerelease
+        id: release
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --draft \
+            --prerelease \
+            --title "${{ steps.meta.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --generate-notes
+          # tauri-action uploads by numeric release id, not tag.
+          RELEASE_ID=$(gh api "repos/$GH_REPO/releases/tags/${{ steps.meta.outputs.tag }}" --jq '.id')
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: ''
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: install frontend dependencies
+        run: bun install
+
+      # Builds the CEF Tauri app via the cli-cef CLI (the `tauri` script) and
+      # uploads the bundles to the draft prerelease created above.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tauriScript: bun run tauri
+          args: ${{ matrix.args }}
+
+  publish:
+    name: Publish prerelease
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish prerelease
+        run: gh release edit "${{ needs.create-release.outputs.tag }}" --draft=false --prerelease

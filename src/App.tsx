@@ -1,7 +1,21 @@
-import { useState } from "react";
+import { useState, type MouseEvent } from "react";
 import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+
+// The embedded Chromium (CEF) webview would otherwise navigate external links
+// inside the app, so route them to the OS default browser via a Rust command.
+async function openExternal(e: MouseEvent<HTMLAnchorElement>) {
+  e.preventDefault();
+  // Capture the href before awaiting: React resets currentTarget after the handler.
+  const url = e.currentTarget.href;
+  try {
+    await invoke("open_external", { url });
+  } catch (err) {
+    console.error(`Failed to open ${url}:`, err);
+    alert(`Failed to open ${url}: ${err}`);
+  }
+}
 
 function App() {
   const [greetMsg, setGreetMsg] = useState("");
@@ -17,13 +31,13 @@ function App() {
       <h1>Welcome to Tauri + React</h1>
 
       <div className="row">
-        <a href="https://vite.dev" target="_blank">
+        <a href="https://vite.dev" target="_blank" onClick={openExternal}>
           <img src="/vite.svg" className="logo vite" alt="Vite logo" />
         </a>
-        <a href="https://tauri.app" target="_blank">
+        <a href="https://tauri.app" target="_blank" onClick={openExternal}>
           <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
         </a>
-        <a href="https://react.dev" target="_blank">
+        <a href="https://react.dev" target="_blank" onClick={openExternal}>
           <img src={reactLogo} className="logo react" alt="React logo" />
         </a>
       </div>
