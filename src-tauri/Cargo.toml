@@ -24,6 +24,11 @@ tauri = { git = "https://github.com/tauri-apps/tauri", tag = "tauri-cef-v3.0.0-a
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+csv = "1"
+# Standalone native file dialog. We deliberately avoid `tauri-plugin-dialog` because it
+# would pull a crates.io `tauri` that conflicts with the git (cef alpha) `tauri` we build
+# against, producing duplicate-crate trait mismatches.
+rfd = "0.15"
 # `shellexecute-on-windows` makes `open::that_detached` use ShellExecuteExW instead of
 # `cmd /c start`, avoiding shell command injection when opening external URLs.
 open = { version = "5", features = ["shellexecute-on-windows"] }

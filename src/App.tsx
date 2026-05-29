@@ -1,63 +1,63 @@
-import { useState, type MouseEvent } from "react";
-import reactLogo from "./assets/react.svg";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-// The embedded Chromium (CEF) webview would otherwise navigate external links
-// inside the app, so route them to the OS default browser via a Rust command.
-async function openExternal(e: MouseEvent<HTMLAnchorElement>) {
-  e.preventDefault();
-  // Capture the href before awaiting: React resets currentTarget after the handler.
-  const url = e.currentTarget.href;
-  try {
-    await invoke("open_external", { url });
-  } catch (err) {
-    console.error(`Failed to open ${url}:`, err);
-    alert(`Failed to open ${url}: ${err}`);
-  }
-}
+type CsvTable = { headers: string[]; rows: string[][] };
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [table, setTable] = useState<CsvTable | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  async function loadCsv() {
+    setLoading(true);
+    setError("");
+    try {
+      // `load_csv` returns null when the user cancels the dialog; keep the current table.
+      const result = await invoke<CsvTable | null>("load_csv");
+      if (result) setTable(result);
+    } catch (err) {
+      console.error("Failed to load CSV:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+      <h1>Spreadsheet</h1>
 
       <div className="row">
-        <a href="https://vite.dev" target="_blank" onClick={openExternal}>
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank" onClick={openExternal}>
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank" onClick={openExternal}>
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+        <button onClick={loadCsv} disabled={loading}>
+          {loading ? "Loading…" : "Load CSV"}
+        </button>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      {error && <p className="error">{error}</p>}
+
+      {table && (
+        <div className="table-wrapper">
+          <table className="csv-table">
+            <thead>
+              <tr>
+                {table.headers.map((header, i) => (
+                  <th key={i}>{header}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.rows.map((row, r) => (
+                <tr key={r}>
+                  {row.map((cell, c) => (
+                    <td key={c}>{cell}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </main>
   );
 }
