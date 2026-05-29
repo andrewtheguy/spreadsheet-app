@@ -35,6 +35,15 @@ fn open_external(url: String) -> Result<(), String> {
 // and the default `wry` feature is disabled in Cargo.toml.
 pub fn run() {
     tauri::Builder::default()
+        // Chromium's password manager (OSCrypt) stores its "Safe Storage" key in the
+        // macOS Keychain. Each rebuild changes the app binary's identity, so macOS
+        // re-prompts for Keychain access on every launch. We don't use Chromium's
+        // password manager, so point it at a mock keychain / basic store to stop the
+        // prompt entirely. Both switches are no-ops on platforms without a keychain.
+        .command_line_args([
+            ("--use-mock-keychain", None::<&str>),
+            ("password-store", Some("basic")),
+        ])
         .invoke_handler(tauri::generate_handler![greet, open_external])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
