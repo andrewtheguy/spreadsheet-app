@@ -32,15 +32,20 @@ jobs:
         id: release
         run: |
           set -euo pipefail
-          gh release create "${{ steps.meta.outputs.tag }}" \
-            --draft \
-            --prerelease \
-            --title "${{ steps.meta.outputs.tag }}" \
-            --target "$GITHUB_SHA" \
-            --generate-notes
-          # tauri-action uploads by numeric release id, not tag.
-          RELEASE_ID=$(gh api "repos/$GH_REPO/releases/tags/${{ steps.meta.outputs.tag }}" --jq '.id')
+          # Create via the API so the response gives us the numeric release id directly.
+          # A draft release has no git tag yet, so it can't be looked up via
+          # `releases/tags/{tag}` (that endpoint only matches published releases).
+          # tauri-action uploads by that numeric id.
+          RELEASE_ID=$(gh api -X POST "repos/$GH_REPO/releases" \
+            -f tag_name="${{ steps.meta.outputs.tag }}" \
+            -f target_commitish="$GITHUB_SHA" \
+            -f name="${{ steps.meta.outputs.tag }}" \
+            -F draft=true \
+            -F prerelease=true \
+            -F generate_release_notes=true \
+            --jq '.id')
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "Created draft release id=$RELEASE_ID"
 
   build:
     name: Build (${{ matrix.platform }})
@@ -87,4 +92,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Publish prerelease
-        run: gh release edit "${{ needs.create-release.outputs.tag }}" --draft=false --prerelease
+        # Edit by numeric id (the release is still a draft, so it has no tag to resolve).
+        # Flipping draft=false creates the git tag and publishes it as a prerelease.
+        run: |
+          gh api -X PATCH "repos/$GH_REPO/releases/${{ needs.create-release.outputs.release_id }}" \
+            -F draft=false \
+            -F prerelease=true
