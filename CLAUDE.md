@@ -2,4 +2,4 @@
 - use project root tmp/ dir for test data
 - run cargo clippy after changes
 - no cargo fmt
-- desktop only for mac and windows, no mobile support
+- desktop mac and windows only, no mobile or linux support

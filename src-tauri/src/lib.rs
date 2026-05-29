@@ -1,7 +1,61 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+// A CSV file parsed into a header row plus data rows, sent to the frontend for display.
+#[derive(serde::Serialize)]
+struct CsvTable {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+// Opens a native file picker for a `.csv` file, parses it with the `csv` crate, and returns
+// its contents. Returns `Ok(None)` when the user cancels the dialog so the frontend can
+// leave the current table untouched.
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+async fn load_csv<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<CsvTable>, String> {
+    // The native dialog must run on the main (UI) thread on macOS. `run_on_main_thread`
+    // only schedules the closure, so hand the chosen path back over a channel. `pick_file`
+    // blocks while the modal is open, which is fine — it spins its own run loop.
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let path = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv"])
+            .pick_file();
+        // Ignore send errors: the only way `rx` is gone is if this command was dropped.
+        let _ = tx.send(path);
+    })
+    .map_err(|e| e.to_string())?;
+
+    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(&path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+
+    let headers: Vec<String> = reader
+        .headers()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(String::from)
+        .collect();
+
+    // `flexible(true)` accepts ragged rows; normalize each to the header width (pad short
+    // rows with empty strings, truncate long ones) so cells stay aligned on the frontend.
+    let column_count = headers.len();
+    let rows = reader
+        .records()
+        .map(|record| {
+            record.map(|r| {
+                let mut row: Vec<String> = r.iter().map(String::from).collect();
+                row.resize(column_count, String::new());
+                row
+            })
+        })
+        .collect::<Result<Vec<Vec<String>>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(CsvTable { headers, rows }))
 }
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
@@ -42,7 +96,7 @@ pub fn run() {
             ("--use-mock-keychain", None::<&str>),
             ("password-store", Some("basic")),
         ])
-        .invoke_handler(tauri::generate_handler![greet, open_external])
+        .invoke_handler(tauri::generate_handler![open_external, load_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
