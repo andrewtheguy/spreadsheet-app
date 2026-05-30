@@ -774,7 +774,7 @@ function App() {
         notifications.show({
           color: "green",
           title: "Export complete",
-          message: "Filtered CSV saved.",
+          message: "Filtered spreadsheet saved.",
         });
       }
     } catch (err) {
@@ -802,7 +802,7 @@ function App() {
         notifications.show({
           color: "green",
           title: "Export complete",
-          message: "Comparison CSV saved.",
+          message: "Comparison spreadsheet saved.",
         });
       }
     } catch (err) {
@@ -845,7 +845,7 @@ function App() {
     >
       <Group justify="center" pos="relative">
         <Title order={1} ta="center">
-          CSV Filter &amp; Compare
+          CSV / Excel Filter &amp; Compare
         </Title>
         <Button
           variant="default"
@@ -964,8 +964,8 @@ function App() {
             ) : (
               <Text c="dimmed" fs="italic">
                 {leftTable && rightTable
-                  ? "Pick a column from the Right CSV to filter the Left CSV."
-                  : "Load both CSVs to filter."}
+                  ? "Pick a column from the right spreadsheet to filter the left spreadsheet."
+                  : "Load both CSV / Excel files to filter."}
               </Text>
             )}
           </>
@@ -1023,9 +1023,9 @@ function App() {
             ) : (
               <Text c="dimmed" fs="italic">
                 {!leftTable || !rightTable
-                  ? "Load both CSVs to compare."
+                  ? "Load both CSV / Excel files to compare."
                   : commonCols.length === 0
-                    ? "The two CSVs share no columns to compare."
+                    ? "The two spreadsheets share no columns to compare."
                     : "Pick key and value columns to compare."}
               </Text>
             )}
