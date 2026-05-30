@@ -46,12 +46,19 @@ async fn load_csv<R: tauri::Runtime>(
         .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
-    let file = File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let table = match extension.as_deref() {
-        Some("csv") => sheet_core::parse_csv(file)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?,
-        Some("xlsx" | "xls") => sheet_core::parse_excel(file)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?,
+        Some("csv") => {
+            let file =
+                File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+            sheet_core::parse_csv(file)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?
+        }
+        Some("xlsx" | "xls") => {
+            let file =
+                File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+            sheet_core::parse_excel(file)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?
+        }
         _ => {
             return Err(format!(
                 "unsupported file type for {}; expected .csv, .xlsx, or .xls",

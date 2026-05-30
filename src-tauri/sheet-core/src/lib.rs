@@ -133,7 +133,7 @@ fn cell_to_string(cell: &Data) -> String {
         Data::DateTime(value) => {
             let (year, month, day, hour, minute, second, millisecond) = value.to_ymd_hms_milli();
             format!(
-                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z"
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}"
             )
         }
         Data::DateTimeIso(value) | Data::DurationIso(value) => value.clone(),
@@ -787,7 +787,7 @@ mod tests {
         let parsed = parse_excel(Cursor::new(bytes)).unwrap();
 
         assert_eq!(parsed.headers, vec!["when".to_string()]);
-        assert_eq!(parsed.rows, rows(&[&["2026-05-29T13:14:15.123Z"]]));
+        assert_eq!(parsed.rows, rows(&[&["2026-05-29T13:14:15.123"]]));
     }
 
     // --- write_csv ---
