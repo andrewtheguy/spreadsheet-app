@@ -143,6 +143,33 @@ fn comparison_to_table(result: ComparisonResult) -> CsvTable {
     sheet_core::comparison_to_table(&result)
 }
 
+// Returns a stored table (the Left/Right source panels, referenced by id) reordered by the
+// `column` header index for display. The store copy is left untouched, so filter/compare
+// operations keep their original ordering.
+#[tauri::command]
+fn sort_csv(
+    store: tauri::State<'_, TableStore>,
+    id: u64,
+    column: usize,
+    ascending: bool,
+) -> Result<CsvTable, String> {
+    let table = store.get(id)?;
+    Ok(sheet_core::sort_rows(&table, column, ascending))
+}
+
+// Reorders a table that isn't held in the store — the filter result — by `column` for
+// display. The (already-computed) table is passed by value since this is a one-off click.
+#[tauri::command]
+fn sort_table(table: CsvTable, column: usize, ascending: bool) -> CsvTable {
+    sheet_core::sort_rows(&table, column, ascending)
+}
+
+// Reorders a comparison result by `column` (0=key, 1=left, 2=right, 3=status) for display.
+#[tauri::command]
+fn sort_comparison(result: ComparisonResult, column: usize, ascending: bool) -> ComparisonResult {
+    sheet_core::sort_comparison(&result, column, ascending)
+}
+
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
 // links inside the embedded Chromium webview, so the frontend routes external links
 // here instead.
@@ -191,7 +218,10 @@ pub fn run() {
             filter_csv,
             common_columns,
             compare_csv,
-            comparison_to_table
+            comparison_to_table,
+            sort_csv,
+            sort_table,
+            sort_comparison
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

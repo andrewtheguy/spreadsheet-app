@@ -2,6 +2,7 @@
 //! the Tauri app so it carries no CEF/dialog dependencies and can be unit-tested in
 //! isolation.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 
@@ -327,6 +328,214 @@ pub fn comparison_to_table(result: &ComparisonResult) -> CsvTable {
         })
         .collect();
     CsvTable { headers, rows }
+}
+
+/// Whether every value in `values` is blank or parses as a number — lets the sort helpers
+/// pick numeric vs lexicographic ordering for a column. An all-blank column is not numeric.
+fn column_is_numeric<'a>(values: impl Iterator<Item = &'a str>) -> bool {
+    let mut any_value = false;
+    for v in values {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        any_value = true;
+        if trimmed.parse::<f64>().is_err() {
+            return false;
+        }
+    }
+    any_value
+}
+
+/// Orders two cells: numerically when `numeric`, else lexicographically. Blank cells sort
+/// before non-blank ones, so reversing for descending order pushes them to the end.
+fn compare_cells(a: &str, b: &str, numeric: bool) -> Ordering {
+    if numeric {
+        match (a.trim().parse::<f64>().ok(), b.trim().parse::<f64>().ok()) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+        }
+    } else {
+        a.cmp(b)
+    }
+}
+
+/// Returns `table` with its rows reordered by `column` (a header index). A numeric column
+/// (every non-blank cell parses as a number) sorts numerically, otherwise lexicographically.
+/// The sort is stable, so cells that compare equal keep their original relative order. An
+/// out-of-range `column` leaves the rows untouched.
+pub fn sort_rows(table: &CsvTable, column: usize, ascending: bool) -> CsvTable {
+    let mut rows = table.rows.clone();
+    if column < table.headers.len() {
+        let numeric = column_is_numeric(
+            rows.iter().map(|r| r.get(column).map(String::as_str).unwrap_or("")),
+        );
+        rows.sort_by(|a, b| {
+            let av = a.get(column).map(String::as_str).unwrap_or("");
+            let bv = b.get(column).map(String::as_str).unwrap_or("");
+            let ord = compare_cells(av, bv, numeric);
+            if ascending { ord } else { ord.reverse() }
+        });
+    }
+    CsvTable {
+        headers: table.headers.clone(),
+        rows,
+    }
+}
+
+/// The sort rank of a status when ordering a comparison by its Status column.
+fn status_rank(status: ComparisonStatus) -> u8 {
+    match status {
+        ComparisonStatus::Matched => 0,
+        ComparisonStatus::Diff => 1,
+        ComparisonStatus::OnlyLeft => 2,
+        ComparisonStatus::OnlyRight => 3,
+    }
+}
+
+/// Returns `result` with its rows reordered by `column`: 0 = key, 1 = left value, 2 = right
+/// value, 3 = status (matched < diff < only-left < only-right). Key/value columns use the
+/// same numeric-aware ordering as [`sort_rows`], treating a missing value as blank. The
+/// summary and column labels are preserved; an out-of-range `column` leaves rows untouched.
+pub fn sort_comparison(
+    result: &ComparisonResult,
+    column: usize,
+    ascending: bool,
+) -> ComparisonResult {
+    let mut rows = result.rows.clone();
+    let value = |row: &ComparisonRow| -> String {
+        match column {
+            0 => row.key.clone(),
+            1 => row.left_value.clone().unwrap_or_default(),
+            2 => row.right_value.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    let column_values: Vec<String> = rows.iter().map(&value).collect();
+    let numeric = column <= 2 && column_is_numeric(column_values.iter().map(String::as_str));
+    rows.sort_by(|a, b| {
+        let ord = if column == 3 {
+            status_rank(a.status).cmp(&status_rank(b.status))
+        } else {
+            compare_cells(&value(a), &value(b), numeric)
+        };
+        if ascending { ord } else { ord.reverse() }
+    });
+    ComparisonResult {
+        rows,
+        key_column: result.key_column.clone(),
+        value_column: result.value_column.clone(),
+        summary: result.summary.clone(),
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    fn table(rows: &[&[&str]]) -> CsvTable {
+        CsvTable {
+            headers: vec!["a".into(), "b".into()],
+            rows: rows
+                .iter()
+                .map(|r| r.iter().map(|s| s.to_string()).collect())
+                .collect(),
+        }
+    }
+
+    fn col(table: &CsvTable, index: usize) -> Vec<&str> {
+        table.rows.iter().map(|r| r[index].as_str()).collect()
+    }
+
+    #[test]
+    fn sorts_numeric_columns_numerically() {
+        let t = table(&[&["10", "x"], &["2", "y"], &["1", "z"]]);
+        assert_eq!(col(&sort_rows(&t, 0, true), 0), ["1", "2", "10"]);
+    }
+
+    #[test]
+    fn sorts_text_columns_and_reverses() {
+        let t = table(&[&["1", "banana"], &["2", "apple"], &["3", "cherry"]]);
+        assert_eq!(col(&sort_rows(&t, 1, true), 1), ["apple", "banana", "cherry"]);
+        assert_eq!(col(&sort_rows(&t, 1, false), 1), ["cherry", "banana", "apple"]);
+    }
+
+    #[test]
+    fn blanks_sort_before_values_ascending() {
+        let t = table(&[&["2", ""], &["1", ""], &["3", "5"]]);
+        // Column 1 has a blank and "5": numeric, blank sorts first ascending.
+        assert_eq!(col(&sort_rows(&t, 1, true), 1), ["", "", "5"]);
+    }
+
+    #[test]
+    fn out_of_range_column_is_unchanged() {
+        let t = table(&[&["2", "y"], &["1", "x"]]);
+        assert_eq!(sort_rows(&t, 9, true), t);
+    }
+
+    #[test]
+    fn sort_is_stable() {
+        let t = table(&[&["1", "first"], &["1", "second"], &["0", "third"]]);
+        assert_eq!(col(&sort_rows(&t, 0, true), 1), ["third", "first", "second"]);
+    }
+
+    fn comparison() -> ComparisonResult {
+        ComparisonResult {
+            rows: vec![
+                ComparisonRow {
+                    key: "banana".into(),
+                    left_value: None,
+                    right_value: Some("1".into()),
+                    status: ComparisonStatus::OnlyRight,
+                },
+                ComparisonRow {
+                    key: "apple".into(),
+                    left_value: Some("1".into()),
+                    right_value: Some("1".into()),
+                    status: ComparisonStatus::Matched,
+                },
+                ComparisonRow {
+                    key: "cherry".into(),
+                    left_value: Some("1".into()),
+                    right_value: Some("2".into()),
+                    status: ComparisonStatus::Diff,
+                },
+            ],
+            key_column: "k".into(),
+            value_column: "v".into(),
+            summary: ComparisonSummary {
+                total: 3,
+                matched: 1,
+                diff: 1,
+                only_left: 0,
+                only_right: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn sorts_comparison_by_key() {
+        let sorted = sort_comparison(&comparison(), 0, true);
+        let keys: Vec<&str> = sorted.rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn sorts_comparison_by_status_and_preserves_summary() {
+        let sorted = sort_comparison(&comparison(), 3, true);
+        let statuses: Vec<ComparisonStatus> = sorted.rows.iter().map(|r| r.status).collect();
+        assert_eq!(
+            statuses,
+            [
+                ComparisonStatus::Matched,
+                ComparisonStatus::Diff,
+                ComparisonStatus::OnlyRight
+            ]
+        );
+        assert_eq!(sorted.summary.total, 3);
+    }
 }
 
 #[cfg(test)]
