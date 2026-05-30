@@ -3,9 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
   Button,
+  Checkbox,
   Group,
   Pagination,
   Paper,
+  Select,
+  SegmentedControl,
   Table,
   Text,
   Title,
@@ -14,6 +17,11 @@ import { notifications } from "@mantine/notifications";
 
 type CsvTable = { headers: string[]; rows: string[][] };
 type LoadedCsv = { table: CsvTable; path: string };
+
+// Mirrors `sheet_core::FilterMode` / `FilterOptions`. `exclude` drops left rows whose value
+// in the chosen column appears in the right's same-named column; `include` keeps only those.
+type FilterMode = "exclude" | "include";
+type FilterOptions = { mode: FilterMode; caseInsensitive: boolean };
 
 const ITEMS_PER_PAGE = 10;
 
@@ -202,38 +210,55 @@ function App() {
   const [rightPage, setRightPage] = useState(1);
 
   const [exporting, setExporting] = useState(false);
-  const [merged, setMerged] = useState<CsvTable | null>(null);
-  const [mergedPage, setMergedPage] = useState(1);
+  // The column to filter by, stored as its index (as a string) into the right table's
+  // headers — indices stay unique even when headers are empty or duplicated.
+  const [selectedColumn, setSelectedColumn] = useState<string | null>(null);
+  const [filterMode, setFilterMode] = useState<FilterMode>("exclude");
+  const [caseInsensitive, setCaseInsensitive] = useState(false);
+  const [filtered, setFiltered] = useState<CsvTable | null>(null);
+  const [filteredPage, setFilteredPage] = useState(1);
 
-  // The merge runs in the Rust `sheet-core` crate via the `merge_csv` command. Recompute
-  // it whenever either source table changes; a cancellation flag drops a stale response if
-  // the inputs change again before it resolves.
+  const columnIndex = selectedColumn === null ? null : Number(selectedColumn);
+  const columnValid =
+    columnIndex !== null &&
+    !!rightTable &&
+    columnIndex < rightTable.headers.length;
+
+  // The filter runs in the Rust `sheet-core` crate via the `filter_csv` command. Recompute
+  // it whenever the inputs change; a cancellation flag drops a stale response if the inputs
+  // change again before it resolves.
   useEffect(() => {
-    if (!leftTable || !rightTable) {
-      setMerged(null);
+    if (!leftTable || !rightTable || !columnValid) {
+      setFiltered(null);
       return;
     }
+    const options: FilterOptions = { mode: filterMode, caseInsensitive };
     let cancelled = false;
-    invoke<CsvTable>("merge_csv", { left: leftTable, right: rightTable })
+    invoke<CsvTable>("filter_csv", {
+      left: leftTable,
+      right: rightTable,
+      column: rightTable.headers[columnIndex],
+      options,
+    })
       .then((result) => {
         if (cancelled) return;
-        setMerged(result);
-        setMergedPage(1);
+        setFiltered(result);
+        setFilteredPage(1);
       })
       .catch((err) => {
         if (cancelled) return;
-        console.error("Failed to merge:", err);
+        console.error("Failed to filter:", err);
         notifications.show({
           color: "red",
-          title: "Merge failed",
+          title: "Filter failed",
           message: String(err),
         });
-        setMerged(null);
+        setFiltered(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [leftTable, rightTable]);
+  }, [leftTable, rightTable, columnIndex, columnValid, filterMode, caseInsensitive]);
 
   async function loadCsv(
     setTable: (table: CsvTable) => void,
@@ -269,14 +294,17 @@ function App() {
     setRightPath(leftPath);
     setLeftPage(1);
     setRightPage(1);
+    // The column is chosen from the right table, which just changed — clear the selection.
+    setSelectedColumn(null);
+    setFilteredPage(1);
   }
 
   async function exportResult() {
-    if (!merged || merged.rows.length === 0) return;
+    if (!filtered || filtered.rows.length === 0) return;
     setExporting(true);
     try {
       // `save_csv` returns false when the user cancels the save dialog; nothing to do.
-      await invoke<boolean>("save_csv", { table: merged });
+      await invoke<boolean>("save_csv", { table: filtered });
     } catch (err) {
       console.error("Failed to export result:", err);
       notifications.show({
@@ -289,11 +317,16 @@ function App() {
     }
   }
 
-  const mergedCount = merged?.rows.length ?? 0;
+  const canExport = !!filtered && filtered.rows.length > 0;
+  const columnOptions =
+    rightTable?.headers.map((_, index) => ({
+      value: String(index),
+      label: displayHeaders(rightTable.headers)[index],
+    })) ?? [];
 
   return (
     // Plain flex column we fully control: a 100vh box whose two row regions (the source
-    // panels and the merged panel) each take half the remaining height with `minHeight: 0`
+    // panels and the filter panel) each take half the remaining height with `minHeight: 0`
     // so they shrink and scroll internally instead of overflowing the viewport.
     <Box
       style={{
@@ -307,7 +340,7 @@ function App() {
     >
       <Group justify="center" pos="relative">
         <Title order={1} ta="center">
-          Spreadsheet Merge
+          Spreadsheet Filter
         </Title>
         <Button
           variant="default"
@@ -362,37 +395,53 @@ function App() {
           flexDirection: "column",
         }}
       >
-        <Group justify="space-between" mb="sm">
-          <Group gap="xs">
+        <Group justify="space-between" mb="sm" wrap="nowrap" align="flex-end">
+          <Group gap="md" align="flex-end" wrap="wrap">
             <Title order={2} size="h4">
-              Merged
+              Filter
             </Title>
-            {merged && (
-              <Text c="dimmed" size="sm">
-                {mergedCount} {mergedCount === 1 ? "row" : "rows"}
-              </Text>
-            )}
+            <Select
+              label="Column (from Right)"
+              placeholder="Select a column"
+              data={columnOptions}
+              value={selectedColumn}
+              onChange={setSelectedColumn}
+              disabled={!rightTable}
+              size="sm"
+              w={220}
+              comboboxProps={{ withinPortal: true }}
+            />
+            <SegmentedControl
+              value={filterMode}
+              onChange={(value) => setFilterMode(value as FilterMode)}
+              data={[
+                { value: "exclude", label: "Exclude" },
+                { value: "include", label: "Include" },
+              ]}
+              size="sm"
+            />
+            <Checkbox
+              label="Case insensitive"
+              checked={caseInsensitive}
+              onChange={(event) => setCaseInsensitive(event.currentTarget.checked)}
+            />
           </Group>
-          <Button
-            onClick={exportResult}
-            loading={exporting}
-            disabled={mergedCount === 0}
-          >
+          <Button onClick={exportResult} loading={exporting} disabled={!canExport}>
             Export result
           </Button>
         </Group>
 
-        {merged && mergedCount > 0 ? (
+        {filtered ? (
           <CsvTableView
-            table={merged}
-            page={mergedPage}
-            onPageChange={setMergedPage}
+            table={filtered}
+            page={filteredPage}
+            onPageChange={setFilteredPage}
           />
         ) : (
           <Text c="dimmed" fs="italic">
             {leftTable && rightTable
-              ? "No left rows match the right CSV's first column."
-              : "Load both CSVs to see matched rows."}
+              ? "Pick a column from the Right CSV to filter the Left CSV."
+              : "Load both CSVs to filter."}
           </Text>
         )}
       </Paper>
