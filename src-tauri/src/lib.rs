@@ -108,19 +108,22 @@ async fn load_csv<R: tauri::Runtime>(
 }
 
 // Opens a native ".csv" save dialog (on the UI thread, as macOS requires) and writes `table` to
-// the chosen path via `sheet-core`. Returns `Ok(false)` when the user cancels so the caller can
+// the chosen path via `sheet-core`. `default_filename` pre-fills the dialog so each caller can
+// suggest a context-specific name. Returns `Ok(false)` when the user cancels so the caller can
 // no-op. Shared by `export_filtered` / `export_comparison`, which write the *full* dataset.
 async fn save_table<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     table: &CsvTable,
+    default_filename: &str,
 ) -> Result<bool, String> {
     // Same main-thread dialog dance as `load_csv`: schedule the modal on the UI thread and hand
     // the chosen path back over a channel.
+    let default_filename = default_filename.to_owned();
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
         let path = rfd::FileDialog::new()
             .add_filter("CSV", &["csv"])
-            .set_file_name("filtered.csv")
+            .set_file_name(default_filename)
             .save_file();
         let _ = tx.send(path);
     })
@@ -254,11 +257,14 @@ async fn export_filtered<R: tauri::Runtime>(
     sort: Option<SortSpec>,
 ) -> Result<bool, String> {
     let table = filtered.get(id)?;
-    let table = match sort {
-        Some(SortSpec { column, ascending }) => sheet_core::sort_rows(&table, column, ascending),
-        None => (*table).clone(),
-    };
-    save_table(&app, &table).await
+    // Sorting produces an owned table; the unsorted path borrows the stored one directly to
+    // avoid cloning the full (potentially huge) dataset just to pass a reference.
+    match sort {
+        Some(SortSpec { column, ascending }) => {
+            save_table(&app, &sheet_core::sort_rows(&table, column, ascending), "filtered.csv").await
+        }
+        None => save_table(&app, &table, "filtered.csv").await,
+    }
 }
 
 // Exports the full stored comparison result (by `ComparisonStore` id) as a four-column CSV,
@@ -279,7 +285,7 @@ async fn export_comparison<R: tauri::Runtime>(
         None => (*result).clone(),
     };
     let table = sheet_core::comparison_to_table(&result);
-    save_table(&app, &table).await
+    save_table(&app, &table, "comparison.csv").await
 }
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
