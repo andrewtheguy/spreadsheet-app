@@ -251,7 +251,7 @@ function TablePanel({
           )}
         </Box>
         <Button onClick={onLoad} loading={loading}>
-          Load CSV
+          Load CSV / Excel
         </Button>
       </Group>
 
@@ -627,10 +627,10 @@ function App() {
         setSort(null);
       }
     } catch (err) {
-      console.error("Failed to load CSV:", err);
+      console.error("Failed to load file:", err);
       notifications.show({
         color: "red",
-        title: "Failed to load CSV",
+        title: "Failed to load file",
         message: String(err),
       });
     } finally {

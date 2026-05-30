@@ -4,7 +4,9 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+
+use calamine::{open_workbook_auto_from_rs, Data, Reader};
 
 /// A CSV file parsed into a header row plus data rows. Serialized to the frontend for
 /// display (`load_csv`) and deserialized back from it for export (`save_csv`).
@@ -38,6 +40,113 @@ pub fn parse_csv<R: Read>(reader: R) -> Result<CsvTable, csv::Error> {
         .collect::<Result<Vec<Vec<String>>, _>>()?;
 
     Ok(CsvTable { headers, rows })
+}
+
+/// Errors that can occur while loading an Excel workbook into a [`CsvTable`].
+#[derive(Debug)]
+pub enum ExcelError {
+    Io(std::io::Error),
+    Open(calamine::Error),
+    NotSingleSheet(Vec<String>),
+    Range(String),
+}
+
+impl std::fmt::Display for ExcelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExcelError::Io(err) => write!(f, "failed to read Excel workbook: {err}"),
+            ExcelError::Open(err) => write!(f, "failed to open Excel workbook: {err}"),
+            ExcelError::NotSingleSheet(names) if names.is_empty() => {
+                write!(f, "Excel file must contain exactly one sheet; found 0")
+            }
+            ExcelError::NotSingleSheet(names) => write!(
+                f,
+                "Excel file must contain exactly one sheet; found {}: {}",
+                names.len(),
+                names.join(", ")
+            ),
+            ExcelError::Range(err) => write!(f, "failed to read Excel worksheet: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ExcelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExcelError::Io(err) => Some(err),
+            ExcelError::Open(err) => Some(err),
+            ExcelError::NotSingleSheet(_) | ExcelError::Range(_) => None,
+        }
+    }
+}
+
+/// Parses a single-sheet Excel workbook into a [`CsvTable`]. The first row becomes headers;
+/// remaining rows are padded/truncated to that same width, matching [`parse_csv`].
+pub fn parse_excel<R: Read + Seek>(mut reader: R) -> Result<CsvTable, ExcelError> {
+    let mut bytes = Vec::new();
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(ExcelError::Io)?;
+    reader.read_to_end(&mut bytes).map_err(ExcelError::Io)?;
+
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes)).map_err(ExcelError::Open)?;
+    let names = workbook.sheet_names();
+    if names.len() != 1 {
+        return Err(ExcelError::NotSingleSheet(names));
+    }
+
+    let range = workbook
+        .worksheet_range(&names[0])
+        .map_err(|err| ExcelError::Range(err.to_string()))?;
+
+    let mut excel_rows = range.rows();
+    let Some(header_row) = excel_rows.next() else {
+        return Ok(CsvTable {
+            headers: Vec::new(),
+            rows: Vec::new(),
+        });
+    };
+
+    let mut headers: Vec<String> = header_row.iter().map(cell_to_string).collect();
+    while headers.last().is_some_and(|header| header.is_empty()) {
+        headers.pop();
+    }
+    let column_count = headers.len();
+    let rows = excel_rows
+        .map(|row| {
+            let mut cells: Vec<String> = row.iter().map(cell_to_string).collect();
+            cells.resize(column_count, String::new());
+            cells
+        })
+        .collect();
+
+    Ok(CsvTable { headers, rows })
+}
+
+fn cell_to_string(cell: &Data) -> String {
+    match cell {
+        Data::Empty => String::new(),
+        Data::String(value) => value.clone(),
+        Data::Bool(value) => value.to_string(),
+        Data::Int(value) => value.to_string(),
+        Data::Float(value) => float_to_string(*value),
+        Data::DateTime(value) => {
+            let (year, month, day, hour, minute, second, millisecond) = value.to_ymd_hms_milli();
+            format!(
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z"
+            )
+        }
+        Data::DateTimeIso(value) | Data::DurationIso(value) => value.clone(),
+        Data::Error(_) => String::new(),
+    }
+}
+
+fn float_to_string(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
 }
 
 /// Writes `table` to `writer` as CSV: the header row followed by each data row.
@@ -551,6 +660,9 @@ mod sort_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    use rust_xlsxwriter::{ExcelDateTime, Format, Workbook, XlsxError};
 
     fn rows(data: &[&[&str]]) -> Vec<Vec<String>> {
         data.iter()
@@ -563,6 +675,12 @@ mod tests {
             headers: headers.iter().map(|s| s.to_string()).collect(),
             rows: rows(data),
         }
+    }
+
+    fn xlsx_bytes(build: impl FnOnce(&mut Workbook) -> Result<(), XlsxError>) -> Vec<u8> {
+        let mut workbook = Workbook::new();
+        build(&mut workbook).unwrap();
+        workbook.save_to_buffer().unwrap()
     }
 
     // --- parse_csv ---
@@ -588,6 +706,88 @@ mod tests {
         let parsed = parse_csv("".as_bytes()).unwrap();
         assert!(parsed.headers.is_empty());
         assert!(parsed.rows.is_empty());
+    }
+
+    // --- parse_excel ---
+
+    #[test]
+    fn parse_excel_reads_headers_and_normalizes_rows() {
+        let bytes = xlsx_bytes(|workbook| {
+            let worksheet = workbook.add_worksheet();
+            worksheet.write_string(0, 0, "id")?;
+            worksheet.write_string(0, 1, "name")?;
+            worksheet.write_string(0, 2, "qty")?;
+            worksheet.write_string(1, 0, "A")?;
+            worksheet.write_string(1, 1, "Apple")?;
+            worksheet.write_number(1, 2, 2)?;
+            worksheet.write_string(2, 0, "B")?;
+            worksheet.write_string(2, 1, "Banana")?;
+            worksheet.write_string(3, 0, "C")?;
+            worksheet.write_string(3, 1, "Cherry")?;
+            worksheet.write_number(3, 2, 5)?;
+            worksheet.write_string(3, 3, "ignored")?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(
+            parsed,
+            table(
+                &["id", "name", "qty"],
+                &[
+                    &["A", "Apple", "2"],
+                    &["B", "Banana", ""],
+                    &["C", "Cherry", "5"],
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn parse_excel_rejects_multi_sheet_workbooks() {
+        let bytes = xlsx_bytes(|workbook| {
+            workbook.add_worksheet().set_name("Left")?;
+            workbook.add_worksheet().set_name("Right")?;
+            Ok(())
+        });
+
+        match parse_excel(Cursor::new(bytes)) {
+            Err(ExcelError::NotSingleSheet(names)) => {
+                assert_eq!(names, vec!["Left".to_string(), "Right".to_string()]);
+            }
+            other => panic!("expected NotSingleSheet error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_excel_empty_sheet_yields_no_headers_or_rows() {
+        let bytes = xlsx_bytes(|workbook| {
+            workbook.add_worksheet().set_name("Empty")?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert!(parsed.headers.is_empty());
+        assert!(parsed.rows.is_empty());
+    }
+
+    #[test]
+    fn parse_excel_formats_dates_as_iso_8601() {
+        let bytes = xlsx_bytes(|workbook| {
+            let worksheet = workbook.add_worksheet();
+            let date_format = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss.000");
+            let datetime = ExcelDateTime::from_ymd(2026, 5, 29)?.and_hms_milli(13, 14, 15, 123)?;
+            worksheet.write_string(0, 0, "when")?;
+            worksheet.write_datetime_with_format(1, 0, &datetime, &date_format)?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(parsed.headers, vec!["when".to_string()]);
+        assert_eq!(parsed.rows, rows(&[&["2026-05-29T13:14:15.123Z"]]));
     }
 
     // --- write_csv ---

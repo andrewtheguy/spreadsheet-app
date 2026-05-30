@@ -16,7 +16,7 @@ struct LoadedCsv {
     path: String,
 }
 
-// Opens a native file picker for a `.csv` file, parses it (via `sheet-core`), and returns
+// Opens a native file picker for a CSV/Excel file, parses it (via `sheet-core`), and returns
 // its contents along with the chosen path. Returns `Ok(None)` when the user cancels the
 // dialog so the frontend can leave the current table untouched.
 #[tauri::command]
@@ -31,7 +31,7 @@ async fn load_csv<R: tauri::Runtime>(
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
         let path = rfd::FileDialog::new()
-            .add_filter("CSV", &["csv"])
+            .add_filter("CSV and Excel", &["csv", "xlsx", "xls"])
             .pick_file();
         // Ignore send errors: the only way `rx` is gone is if this command was dropped.
         let _ = tx.send(path);
@@ -42,9 +42,23 @@ async fn load_csv<R: tauri::Runtime>(
         return Ok(None);
     };
 
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
     let file = File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
-    let table =
-        sheet_core::parse_csv(file).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let table = match extension.as_deref() {
+        Some("csv") => sheet_core::parse_csv(file)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?,
+        Some("xlsx" | "xls") => sheet_core::parse_excel(file)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?,
+        _ => {
+            return Err(format!(
+                "unsupported file type for {}; expected .csv, .xlsx, or .xls",
+                path.display()
+            ));
+        }
+    };
     // Hold the table in the backend store (evicting the side's previous table) and hand its
     // id back alongside the data the frontend renders.
     let id = store.insert(table.clone(), replace);
