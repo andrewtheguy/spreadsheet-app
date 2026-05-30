@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Alert,
@@ -94,22 +94,32 @@ function App() {
 
   const [exporting, setExporting] = useState(false);
   const [mergedError, setMergedError] = useState("");
+  const [merged, setMerged] = useState<CsvTable | null>(null);
 
-  // Left rows whose (trimmed) first-column value also appears, trimmed, in the right
-  // table's first column. Blank/whitespace-only keys are skipped on both sides; the match
-  // is case-sensitive. Original (untrimmed) cells are preserved in the output.
-  const merged = useMemo<CsvTable | null>(() => {
-    if (!leftTable || !rightTable) return null;
-    const rightKeys = new Set(
-      rightTable.rows
-        .map((row) => row[0]?.trim() ?? "")
-        .filter((key) => key !== ""),
-    );
-    const rows = leftTable.rows.filter((row) => {
-      const key = row[0]?.trim() ?? "";
-      return key !== "" && rightKeys.has(key);
-    });
-    return { headers: leftTable.headers, rows };
+  // The merge runs in the Rust `sheet-core` crate via the `merge_csv` command. Recompute
+  // it whenever either source table changes; a cancellation flag drops a stale response if
+  // the inputs change again before it resolves.
+  useEffect(() => {
+    if (!leftTable || !rightTable) {
+      setMerged(null);
+      setMergedError("");
+      return;
+    }
+    let cancelled = false;
+    setMergedError("");
+    invoke<CsvTable>("merge_csv", { left: leftTable, right: rightTable })
+      .then((result) => {
+        if (!cancelled) setMerged(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to merge:", err);
+        setMergedError(String(err));
+        setMerged(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [leftTable, rightTable]);
 
   async function loadCsv(
@@ -211,7 +221,7 @@ function App() {
           <CsvTableView table={merged} />
         ) : (
           <Text c="dimmed" fs="italic">
-            {merged
+            {leftTable && rightTable
               ? "No left rows match the right CSV's first column."
               : "Load both CSVs to see matched rows."}
           </Text>

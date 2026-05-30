@@ -1,0 +1,13 @@
+[package]
+name = "sheet-core"
+version = "0.1.0"
+edition = "2021"
+
+# Pure CSV parsing, serializing, and row-matching logic with no Tauri/CEF dependencies, so
+# it builds and tests in isolation and in seconds (`cargo test -p sheet-core`).
+[lib]
+name = "sheet_core"
+
+[dependencies]
+csv = "1"
+serde = { version = "1", features = ["derive"] }

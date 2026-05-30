@@ -1,12 +1,8 @@
-// A CSV file parsed into a header row plus data rows. Sent to the frontend for display
-// (`load_csv`) and received back from it for export (`save_csv`).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CsvTable {
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
-}
+use std::fs::File;
 
-// Opens a native file picker for a `.csv` file, parses it with the `csv` crate, and returns
+use sheet_core::CsvTable;
+
+// Opens a native file picker for a `.csv` file, parses it (via `sheet-core`), and returns
 // its contents. Returns `Ok(None)` when the user cancels the dialog so the frontend can
 // leave the current table untouched.
 #[tauri::command]
@@ -28,39 +24,14 @@ async fn load_csv<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<
         return Ok(None);
     };
 
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_path(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-
-    let headers: Vec<String> = reader
-        .headers()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(String::from)
-        .collect();
-
-    // `flexible(true)` accepts ragged rows; normalize each to the header width (pad short
-    // rows with empty strings, truncate long ones) so cells stay aligned on the frontend.
-    let column_count = headers.len();
-    let rows = reader
-        .records()
-        .map(|record| {
-            record.map(|r| {
-                let mut row: Vec<String> = r.iter().map(String::from).collect();
-                row.resize(column_count, String::new());
-                row
-            })
-        })
-        .collect::<Result<Vec<Vec<String>>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    Ok(Some(CsvTable { headers, rows }))
+    let file = File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let table =
+        sheet_core::parse_csv(file).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    Ok(Some(table))
 }
 
-// Opens a native save dialog for a `.csv` file and writes `table` to it. Returns `Ok(false)`
-// when the user cancels the dialog so the frontend can no-op.
+// Opens a native save dialog for a `.csv` file and writes `table` to it (via `sheet-core`).
+// Returns `Ok(false)` when the user cancels the dialog so the frontend can no-op.
 #[tauri::command]
 async fn save_csv<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -82,17 +53,18 @@ async fn save_csv<R: tauri::Runtime>(
         return Ok(false);
     };
 
-    let mut writer = csv::Writer::from_path(&path)
+    let file =
+        File::create(&path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    sheet_core::write_csv(file, &table)
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-    writer
-        .write_record(&table.headers)
-        .map_err(|e| e.to_string())?;
-    for row in &table.rows {
-        writer.write_record(row).map_err(|e| e.to_string())?;
-    }
-    writer.flush().map_err(|e| e.to_string())?;
-
     Ok(true)
+}
+
+// Computes the merged result — `left`'s rows whose first column appears in `right`'s first
+// column. The matching logic lives in the `sheet-core` crate.
+#[tauri::command]
+fn merge_csv(left: CsvTable, right: CsvTable) -> CsvTable {
+    sheet_core::merge(&left, &right)
 }
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
@@ -133,7 +105,12 @@ pub fn run() {
             ("--use-mock-keychain", None::<&str>),
             ("password-store", Some("basic")),
         ])
-        .invoke_handler(tauri::generate_handler![open_external, load_csv, save_csv])
+        .invoke_handler(tauri::generate_handler![
+            open_external,
+            load_csv,
+            save_csv,
+            merge_csv
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
