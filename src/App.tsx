@@ -573,7 +573,14 @@ function App() {
     setExporting(true);
     try {
       // `save_csv` returns false when the user cancels the save dialog; nothing to do.
-      await invoke<boolean>("save_csv", { table: filtered });
+      const saved = await invoke<boolean>("save_csv", { table: filtered });
+      if (saved) {
+        notifications.show({
+          color: "green",
+          title: "Export complete",
+          message: "Filtered CSV saved.",
+        });
+      }
     } catch (err) {
       console.error("Failed to export result:", err);
       notifications.show({
@@ -594,7 +601,14 @@ function App() {
       const table = await invoke<CsvTable>("comparison_to_table", {
         result: comparison,
       });
-      await invoke<boolean>("save_csv", { table });
+      const saved = await invoke<boolean>("save_csv", { table });
+      if (saved) {
+        notifications.show({
+          color: "green",
+          title: "Export complete",
+          message: "Comparison CSV saved.",
+        });
+      }
     } catch (err) {
       console.error("Failed to export comparison:", err);
       notifications.show({
