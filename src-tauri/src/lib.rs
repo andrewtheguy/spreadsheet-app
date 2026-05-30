@@ -2,11 +2,21 @@ use std::fs::File;
 
 use sheet_core::CsvTable;
 
+// A parsed CSV paired with the path it was loaded from, so the frontend can display the
+// source file in the panel title.
+#[derive(serde::Serialize)]
+struct LoadedCsv {
+    table: CsvTable,
+    path: String,
+}
+
 // Opens a native file picker for a `.csv` file, parses it (via `sheet-core`), and returns
-// its contents. Returns `Ok(None)` when the user cancels the dialog so the frontend can
-// leave the current table untouched.
+// its contents along with the chosen path. Returns `Ok(None)` when the user cancels the
+// dialog so the frontend can leave the current table untouched.
 #[tauri::command]
-async fn load_csv<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<CsvTable>, String> {
+async fn load_csv<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<LoadedCsv>, String> {
     // The native dialog must run on the main (UI) thread on macOS. `run_on_main_thread`
     // only schedules the closure, so hand the chosen path back over a channel. `pick_file`
     // blocks while the modal is open, which is fine — it spins its own run loop.
@@ -27,7 +37,10 @@ async fn load_csv<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<
     let file = File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let table =
         sheet_core::parse_csv(file).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    Ok(Some(table))
+    Ok(Some(LoadedCsv {
+        table,
+        path: path.display().to_string(),
+    }))
 }
 
 // Opens a native save dialog for a `.csv` file and writes `table` to it (via `sheet-core`).
