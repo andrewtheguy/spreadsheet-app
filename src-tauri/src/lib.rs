@@ -2,10 +2,16 @@ use std::fs::File;
 
 use sheet_core::{ComparisonResult, CsvTable, FilterOptions};
 
+mod store;
+use store::TableStore;
+
 // A parsed CSV paired with the path it was loaded from, so the frontend can display the
-// source file in the panel title.
+// source file in the panel title. `id` is the handle into the backend `TableStore`; the
+// frontend passes it back to `filter_csv` / `compare_csv` / `common_columns` instead of
+// re-shipping the whole table on every recompute.
 #[derive(serde::Serialize)]
 struct LoadedCsv {
+    id: u64,
     table: CsvTable,
     path: String,
 }
@@ -16,6 +22,8 @@ struct LoadedCsv {
 #[tauri::command]
 async fn load_csv<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
+    store: tauri::State<'_, TableStore>,
+    replace: Option<u64>,
 ) -> Result<Option<LoadedCsv>, String> {
     // The native dialog must run on the main (UI) thread on macOS. `run_on_main_thread`
     // only schedules the closure, so hand the chosen path back over a channel. `pick_file`
@@ -37,7 +45,11 @@ async fn load_csv<R: tauri::Runtime>(
     let file = File::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let table =
         sheet_core::parse_csv(file).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    // Hold the table in the backend store (evicting the side's previous table) and hand its
+    // id back alongside the data the frontend renders.
+    let id = store.insert(table.clone(), replace);
     Ok(Some(LoadedCsv {
+        id,
         table,
         path: path.display().to_string(),
     }))
@@ -74,29 +86,55 @@ async fn save_csv<R: tauri::Runtime>(
 }
 
 // Filters `left`'s rows by whether their value in `column` appears in `right`'s same-named
-// column. The filtering logic lives in the `sheet-core` crate.
+// column. Both tables are referenced by their `TableStore` id rather than passed by value,
+// so a recompute ships two ids instead of two full tables. The filtering logic lives in the
+// `sheet-core` crate.
 #[tauri::command]
-fn filter_csv(left: CsvTable, right: CsvTable, column: String, options: FilterOptions) -> CsvTable {
-    sheet_core::filter_rows(&left, &right, &column, &options)
+fn filter_csv(
+    store: tauri::State<'_, TableStore>,
+    left_id: u64,
+    right_id: u64,
+    column: String,
+    options: FilterOptions,
+) -> Result<CsvTable, String> {
+    let left = store.get(left_id)?;
+    let right = store.get(right_id)?;
+    Ok(sheet_core::filter_rows(&left, &right, &column, &options))
 }
 
 // Header names present in both tables — the candidate key/value columns for `compare_csv`.
 #[tauri::command]
-fn common_columns(left: CsvTable, right: CsvTable) -> Vec<String> {
-    sheet_core::common_columns(&left, &right)
+fn common_columns(
+    store: tauri::State<'_, TableStore>,
+    left_id: u64,
+    right_id: u64,
+) -> Result<Vec<String>, String> {
+    let left = store.get(left_id)?;
+    let right = store.get(right_id)?;
+    Ok(sheet_core::common_columns(&left, &right))
 }
 
-// VLOOKUP-style diff of `left` vs `right` by `key_column`, comparing `value_column`. The
-// comparison logic lives in the `sheet-core` crate.
+// VLOOKUP-style diff of `left` vs `right` by `key_column`, comparing `value_column`. Both
+// tables are referenced by their `TableStore` id. The comparison logic lives in the
+// `sheet-core` crate.
 #[tauri::command]
 fn compare_csv(
-    left: CsvTable,
-    right: CsvTable,
+    store: tauri::State<'_, TableStore>,
+    left_id: u64,
+    right_id: u64,
     key_column: String,
     value_column: String,
     case_insensitive: bool,
-) -> ComparisonResult {
-    sheet_core::compare(&left, &right, &key_column, &value_column, case_insensitive)
+) -> Result<ComparisonResult, String> {
+    let left = store.get(left_id)?;
+    let right = store.get(right_id)?;
+    Ok(sheet_core::compare(
+        &left,
+        &right,
+        &key_column,
+        &value_column,
+        case_insensitive,
+    ))
 }
 
 // Renders a comparison result as a four-column table for export via `save_csv`.
@@ -134,6 +172,9 @@ fn open_external(url: String) -> Result<(), String> {
 // and the default `wry` feature is disabled in Cargo.toml.
 pub fn run() {
     tauri::Builder::default()
+        // Holds loaded tables so filter/compare/common-columns can reference them by id
+        // instead of re-receiving full table payloads on every recompute.
+        .manage(TableStore::default())
         // Chromium's password manager (OSCrypt) stores its "Safe Storage" key in the
         // macOS Keychain. Each rebuild changes the app binary's identity, so macOS
         // re-prompts for Keychain access on every launch. We don't use Chromium's
