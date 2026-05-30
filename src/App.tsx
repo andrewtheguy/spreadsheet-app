@@ -40,6 +40,13 @@ function truncatePath(path: string, maxLength = 50): string {
   const fileName = sepIndex >= 0 ? path.slice(sepIndex + 1) : path;
   const dir = sepIndex >= 0 ? path.slice(0, sepIndex) : "";
 
+  // When the filename alone won't fit, there's no room for any directory context — truncate
+  // the filename itself to keep the result within `maxLength` (and avoid a negative
+  // `startLength` below).
+  if (fileName.length >= maxLength - 4) {
+    return `...${fileName.slice(-(maxLength - 3))}`;
+  }
+
   if (dir.length === 0) return `.../${fileName}`;
   if (dir.length <= maxLength - fileName.length - 1) return path;
 
