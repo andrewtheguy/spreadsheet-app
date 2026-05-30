@@ -4,14 +4,70 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
-/// A CSV file parsed into a header row plus data rows. Serialized to the frontend for
-/// display (`load_csv`) and deserialized back from it for export (`save_csv`).
+use calamine::{open_workbook_auto_from_rs, Data, Reader};
+
+/// A CSV file parsed into a header row plus data rows. Held in the backend store and used by
+/// all the row-matching logic; the UI only ever receives a bounded [`TablePreview`] of it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CsvTable {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+}
+
+/// Maximum rows shipped to the UI for display. Extremely large tables would otherwise hang the
+/// frontend (the whole payload crosses IPC and lands in JS state) even though the grid only
+/// renders a page at a time. The full table stays server-side for sort/filter/compare/export.
+pub const MAX_PREVIEW_ROWS: usize = 1000;
+
+/// A bounded view of a [`CsvTable`] for the UI: the first [`MAX_PREVIEW_ROWS`] rows plus the
+/// true total, so the frontend renders quickly and can still show "first 1,000 of N rows".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePreview {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub total_rows: usize,
+}
+
+impl TablePreview {
+    /// Builds a preview of `table`, copying at most [`MAX_PREVIEW_ROWS`] rows and recording the
+    /// full row count in `total_rows`.
+    pub fn from_table(table: &CsvTable) -> Self {
+        TablePreview {
+            headers: table.headers.clone(),
+            rows: table.rows.iter().take(MAX_PREVIEW_ROWS).cloned().collect(),
+            total_rows: table.rows.len(),
+        }
+    }
+}
+
+/// A bounded view of a [`ComparisonResult`] for the UI, mirroring [`TablePreview`]. The
+/// `summary` is computed over the full result, so its tallies stay accurate even when `rows`
+/// is capped; `total_rows` is the full row count.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonPreview {
+    pub rows: Vec<ComparisonRow>,
+    pub key_column: String,
+    pub value_column: String,
+    pub summary: ComparisonSummary,
+    pub total_rows: usize,
+}
+
+impl ComparisonPreview {
+    /// Builds a preview of `result`, copying at most [`MAX_PREVIEW_ROWS`] rows and recording the
+    /// full row count in `total_rows`.
+    pub fn from_result(result: &ComparisonResult) -> Self {
+        ComparisonPreview {
+            rows: result.rows.iter().take(MAX_PREVIEW_ROWS).cloned().collect(),
+            key_column: result.key_column.clone(),
+            value_column: result.value_column.clone(),
+            summary: result.summary.clone(),
+            total_rows: result.rows.len(),
+        }
+    }
 }
 
 /// Parses CSV from `reader`, treating the first record as headers. Ragged rows are
@@ -38,6 +94,113 @@ pub fn parse_csv<R: Read>(reader: R) -> Result<CsvTable, csv::Error> {
         .collect::<Result<Vec<Vec<String>>, _>>()?;
 
     Ok(CsvTable { headers, rows })
+}
+
+/// Errors that can occur while loading an Excel workbook into a [`CsvTable`].
+#[derive(Debug)]
+pub enum ExcelError {
+    Io(std::io::Error),
+    Open(calamine::Error),
+    NotSingleSheet(Vec<String>),
+    Range(String),
+}
+
+impl std::fmt::Display for ExcelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExcelError::Io(err) => write!(f, "failed to read Excel workbook: {err}"),
+            ExcelError::Open(err) => write!(f, "failed to open Excel workbook: {err}"),
+            ExcelError::NotSingleSheet(names) if names.is_empty() => {
+                write!(f, "Excel file must contain exactly one sheet; found 0")
+            }
+            ExcelError::NotSingleSheet(names) => write!(
+                f,
+                "Excel file must contain exactly one sheet; found {}: {}",
+                names.len(),
+                names.join(", ")
+            ),
+            ExcelError::Range(err) => write!(f, "failed to read Excel worksheet: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ExcelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExcelError::Io(err) => Some(err),
+            ExcelError::Open(err) => Some(err),
+            ExcelError::NotSingleSheet(_) | ExcelError::Range(_) => None,
+        }
+    }
+}
+
+/// Parses a single-sheet Excel workbook into a [`CsvTable`]. The first row becomes headers;
+/// remaining rows are padded/truncated to that same width, matching [`parse_csv`].
+pub fn parse_excel<R: Read + Seek>(mut reader: R) -> Result<CsvTable, ExcelError> {
+    let mut bytes = Vec::new();
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(ExcelError::Io)?;
+    reader.read_to_end(&mut bytes).map_err(ExcelError::Io)?;
+
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes)).map_err(ExcelError::Open)?;
+    let names = workbook.sheet_names();
+    if names.len() != 1 {
+        return Err(ExcelError::NotSingleSheet(names));
+    }
+
+    let range = workbook
+        .worksheet_range(&names[0])
+        .map_err(|err| ExcelError::Range(err.to_string()))?;
+
+    let mut excel_rows = range.rows();
+    let Some(header_row) = excel_rows.next() else {
+        return Ok(CsvTable {
+            headers: Vec::new(),
+            rows: Vec::new(),
+        });
+    };
+
+    let mut headers: Vec<String> = header_row.iter().map(cell_to_string).collect();
+    while headers.last().is_some_and(|header| header.is_empty()) {
+        headers.pop();
+    }
+    let column_count = headers.len();
+    let rows = excel_rows
+        .map(|row| {
+            let mut cells: Vec<String> = row.iter().map(cell_to_string).collect();
+            cells.resize(column_count, String::new());
+            cells
+        })
+        .collect();
+
+    Ok(CsvTable { headers, rows })
+}
+
+fn cell_to_string(cell: &Data) -> String {
+    match cell {
+        Data::Empty => String::new(),
+        Data::String(value) => value.clone(),
+        Data::Bool(value) => value.to_string(),
+        Data::Int(value) => value.to_string(),
+        Data::Float(value) => float_to_string(*value),
+        Data::DateTime(value) => {
+            let (year, month, day, hour, minute, second, millisecond) = value.to_ymd_hms_milli();
+            format!(
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}"
+            )
+        }
+        Data::DateTimeIso(value) | Data::DurationIso(value) => value.clone(),
+        Data::Error(_) => String::new(),
+    }
+}
+
+fn float_to_string(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
 }
 
 /// Writes `table` to `writer` as CSV: the header row followed by each data row.
@@ -551,6 +714,9 @@ mod sort_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    use rust_xlsxwriter::{ExcelDateTime, Format, Workbook, XlsxError};
 
     fn rows(data: &[&[&str]]) -> Vec<Vec<String>> {
         data.iter()
@@ -563,6 +729,12 @@ mod tests {
             headers: headers.iter().map(|s| s.to_string()).collect(),
             rows: rows(data),
         }
+    }
+
+    fn xlsx_bytes(build: impl FnOnce(&mut Workbook) -> Result<(), XlsxError>) -> Vec<u8> {
+        let mut workbook = Workbook::new();
+        build(&mut workbook).unwrap();
+        workbook.save_to_buffer().unwrap()
     }
 
     // --- parse_csv ---
@@ -588,6 +760,88 @@ mod tests {
         let parsed = parse_csv("".as_bytes()).unwrap();
         assert!(parsed.headers.is_empty());
         assert!(parsed.rows.is_empty());
+    }
+
+    // --- parse_excel ---
+
+    #[test]
+    fn parse_excel_reads_headers_and_normalizes_rows() {
+        let bytes = xlsx_bytes(|workbook| {
+            let worksheet = workbook.add_worksheet();
+            worksheet.write_string(0, 0, "id")?;
+            worksheet.write_string(0, 1, "name")?;
+            worksheet.write_string(0, 2, "qty")?;
+            worksheet.write_string(1, 0, "A")?;
+            worksheet.write_string(1, 1, "Apple")?;
+            worksheet.write_number(1, 2, 2)?;
+            worksheet.write_string(2, 0, "B")?;
+            worksheet.write_string(2, 1, "Banana")?;
+            worksheet.write_string(3, 0, "C")?;
+            worksheet.write_string(3, 1, "Cherry")?;
+            worksheet.write_number(3, 2, 5)?;
+            worksheet.write_string(3, 3, "ignored")?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(
+            parsed,
+            table(
+                &["id", "name", "qty"],
+                &[
+                    &["A", "Apple", "2"],
+                    &["B", "Banana", ""],
+                    &["C", "Cherry", "5"],
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn parse_excel_rejects_multi_sheet_workbooks() {
+        let bytes = xlsx_bytes(|workbook| {
+            workbook.add_worksheet().set_name("Left")?;
+            workbook.add_worksheet().set_name("Right")?;
+            Ok(())
+        });
+
+        match parse_excel(Cursor::new(bytes)) {
+            Err(ExcelError::NotSingleSheet(names)) => {
+                assert_eq!(names, vec!["Left".to_string(), "Right".to_string()]);
+            }
+            other => panic!("expected NotSingleSheet error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_excel_empty_sheet_yields_no_headers_or_rows() {
+        let bytes = xlsx_bytes(|workbook| {
+            workbook.add_worksheet().set_name("Empty")?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert!(parsed.headers.is_empty());
+        assert!(parsed.rows.is_empty());
+    }
+
+    #[test]
+    fn parse_excel_formats_dates_as_iso_8601() {
+        let bytes = xlsx_bytes(|workbook| {
+            let worksheet = workbook.add_worksheet();
+            let date_format = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss.000");
+            let datetime = ExcelDateTime::from_ymd(2026, 5, 29)?.and_hms_milli(13, 14, 15, 123)?;
+            worksheet.write_string(0, 0, "when")?;
+            worksheet.write_datetime_with_format(1, 0, &datetime, &date_format)?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(parsed.headers, vec!["when".to_string()]);
+        assert_eq!(parsed.rows, rows(&[&["2026-05-29T13:14:15.123"]]));
     }
 
     // --- write_csv ---
@@ -782,6 +1036,69 @@ mod tests {
         assert_eq!(result.summary.total, 1);
         assert_eq!(result.rows[0].status, ComparisonStatus::Matched);
         assert_eq!(result.rows[0].left_value.as_deref(), Some("2"));
+    }
+
+    // --- previews ---
+
+    #[test]
+    fn table_preview_passes_through_when_under_cap() {
+        let t = table(&["a"], &[&["1"], &["2"]]);
+        let preview = TablePreview::from_table(&t);
+        assert_eq!(preview.headers, vec!["a".to_string()]);
+        assert_eq!(preview.rows, rows(&[&["1"], &["2"]]));
+        assert_eq!(preview.total_rows, 2);
+    }
+
+    #[test]
+    fn table_preview_caps_rows_but_reports_full_total() {
+        let data: Vec<Vec<String>> = (0..MAX_PREVIEW_ROWS + 50)
+            .map(|i| vec![i.to_string()])
+            .collect();
+        let t = CsvTable {
+            headers: vec!["a".to_string()],
+            rows: data,
+        };
+        let preview = TablePreview::from_table(&t);
+        assert_eq!(preview.rows.len(), MAX_PREVIEW_ROWS);
+        assert_eq!(preview.total_rows, MAX_PREVIEW_ROWS + 50);
+        // The cap keeps the *first* rows, in order.
+        assert_eq!(preview.rows[0], vec!["0".to_string()]);
+        assert_eq!(
+            preview.rows[MAX_PREVIEW_ROWS - 1],
+            vec![(MAX_PREVIEW_ROWS - 1).to_string()]
+        );
+    }
+
+    #[test]
+    fn comparison_preview_caps_rows_and_keeps_full_summary() {
+        let rows: Vec<ComparisonRow> = (0..MAX_PREVIEW_ROWS + 10)
+            .map(|i| ComparisonRow {
+                key: i.to_string(),
+                left_value: Some("x".into()),
+                right_value: Some("x".into()),
+                status: ComparisonStatus::Matched,
+            })
+            .collect();
+        let result = ComparisonResult {
+            rows,
+            key_column: "k".into(),
+            value_column: "v".into(),
+            summary: ComparisonSummary {
+                total: MAX_PREVIEW_ROWS + 10,
+                matched: MAX_PREVIEW_ROWS + 10,
+                diff: 0,
+                only_left: 0,
+                only_right: 0,
+            },
+        };
+        let preview = ComparisonPreview::from_result(&result);
+        assert_eq!(preview.rows.len(), MAX_PREVIEW_ROWS);
+        assert_eq!(preview.total_rows, MAX_PREVIEW_ROWS + 10);
+        // Summary reflects the full result, not the capped rows.
+        assert_eq!(preview.summary.total, MAX_PREVIEW_ROWS + 10);
+        assert_eq!(preview.summary.matched, MAX_PREVIEW_ROWS + 10);
+        assert_eq!(preview.key_column, "k");
+        assert_eq!(preview.value_column, "v");
     }
 
     #[test]

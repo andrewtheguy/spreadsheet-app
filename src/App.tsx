@@ -16,10 +16,17 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 
-type CsvTable = { headers: string[]; rows: string[][] };
-// `id` is the backend `TableStore` handle; it's sent to filter/compare/common-columns
+// A bounded view of a table the backend ships for display: at most the first
+// `MAX_PREVIEW_ROWS` (1000) rows plus the true `totalRows`, so an extremely large dataset can't
+// hang the UI. The full table stays server-side (referenced by id) for sort/filter/export.
+type TablePreview = { headers: string[]; rows: string[][]; totalRows: number };
+// `id` is the backend `TableStore` handle; it's sent to filter/compare/common-columns/sort
 // instead of the whole table on every recompute.
-type LoadedCsv = { id: number; table: CsvTable; path: string };
+type LoadedCsv = { id: number; table: TablePreview; path: string };
+// `filter_csv` / `compare_csv` return a bounded preview plus the backend id of the full result,
+// which is passed back to sort/export so they operate on every row, not just the visible 1000.
+type FilteredCsv = { id: number; table: TablePreview };
+type ComparedCsv = { id: number; result: ComparisonPreview };
 
 // Mirrors `sheet_core::FilterMode` / `FilterOptions`. `exclude` drops left rows whose value
 // in the chosen column appears in the right's same-named column; `include` keeps only those.
@@ -61,11 +68,15 @@ type ComparisonSummary = {
   onlyLeft: number;
   onlyRight: number;
 };
-type ComparisonResult = {
+// A bounded view of a comparison result, mirroring `TablePreview`: at most the first
+// `MAX_PREVIEW_ROWS` rows plus the true `totalRows`. `summary` is computed over the full result,
+// so its tallies stay accurate even when `rows` is capped.
+type ComparisonPreview = {
   rows: ComparisonRow[];
   keyColumn: string;
   valueColumn: string;
   summary: ComparisonSummary;
+  totalRows: number;
 };
 
 const ITEMS_PER_PAGE = 10;
@@ -110,7 +121,7 @@ function truncatePath(path: string, maxLength = 50): string {
 }
 
 type CsvTableViewProps = {
-  table: CsvTable;
+  table: TablePreview;
   page: number;
   onPageChange: (page: number) => void;
   // Current sort and a click handler keyed by column index. The parent owns sorting (it
@@ -133,6 +144,8 @@ function CsvTableView({
   const startIndex = (page - 1) * ITEMS_PER_PAGE;
   const endIndex = startIndex + ITEMS_PER_PAGE;
   const pageRows = visibleRows.slice(startIndex, endIndex);
+  // The backend caps previews at the first 1000 rows; note when more rows exist server-side.
+  const capped = table.totalRows > table.rows.length;
 
   return (
     <Box
@@ -187,6 +200,8 @@ function CsvTableView({
                 endIndex,
                 visibleRows.length,
               )} of ${visibleRows.length} rows`}
+          {capped &&
+            ` · preview of first ${table.rows.length.toLocaleString()} of ${table.totalRows.toLocaleString()} rows`}
         </Text>
         {totalPages > 1 && (
           <Pagination
@@ -205,7 +220,7 @@ function CsvTableView({
 
 type TablePanelProps = {
   title: string;
-  table: CsvTable | null;
+  table: TablePreview | null;
   path: string | null;
   loading: boolean;
   page: number;
@@ -251,7 +266,7 @@ function TablePanel({
           )}
         </Box>
         <Button onClick={onLoad} loading={loading}>
-          Load CSV
+          Load CSV / Excel
         </Button>
       </Group>
 
@@ -288,7 +303,7 @@ const STATUS_LABEL: Record<ComparisonStatus, string> = {
 };
 
 type ComparisonTableViewProps = {
-  result: ComparisonResult;
+  result: ComparisonPreview;
   page: number;
   onPageChange: (page: number) => void;
   // Sort runs in Rust; this view renders the already-sorted `result` and emits header
@@ -315,6 +330,8 @@ function ComparisonTableView({
   const startIndex = (page - 1) * ITEMS_PER_PAGE;
   const endIndex = startIndex + ITEMS_PER_PAGE;
   const pageRows = rows.slice(startIndex, endIndex);
+  // The backend caps previews at the first 1000 rows; note when more rows exist server-side.
+  const capped = result.totalRows > rows.length;
 
   return (
     <Box
@@ -389,6 +406,8 @@ function ComparisonTableView({
                 endIndex,
                 rows.length,
               )} of ${rows.length} rows`}
+          {capped &&
+            ` · preview of first ${rows.length.toLocaleString()} of ${result.totalRows.toLocaleString()} rows`}
         </Text>
         {totalPages > 1 && (
           <Pagination
@@ -406,7 +425,7 @@ function ComparisonTableView({
 }
 
 function App() {
-  const [leftTable, setLeftTable] = useState<CsvTable | null>(null);
+  const [leftTable, setLeftTable] = useState<TablePreview | null>(null);
   const [leftId, setLeftId] = useState<number | null>(null);
   const [leftPath, setLeftPath] = useState<string | null>(null);
   const [leftLoading, setLeftLoading] = useState(false);
@@ -414,15 +433,15 @@ function App() {
   // Display-only sorted view of the left table (null = show it unsorted) plus its sort
   // state. Kept separate from `leftTable` so sorting for display never re-triggers the
   // filter/compare effects or the backend operations (which still use the original order).
-  const [leftView, setLeftView] = useState<CsvTable | null>(null);
+  const [leftView, setLeftView] = useState<TablePreview | null>(null);
   const [leftSort, setLeftSort] = useState<SortState | null>(null);
 
-  const [rightTable, setRightTable] = useState<CsvTable | null>(null);
+  const [rightTable, setRightTable] = useState<TablePreview | null>(null);
   const [rightId, setRightId] = useState<number | null>(null);
   const [rightPath, setRightPath] = useState<string | null>(null);
   const [rightLoading, setRightLoading] = useState(false);
   const [rightPage, setRightPage] = useState(1);
-  const [rightView, setRightView] = useState<CsvTable | null>(null);
+  const [rightView, setRightView] = useState<TablePreview | null>(null);
   const [rightSort, setRightSort] = useState<SortState | null>(null);
 
   const [exporting, setExporting] = useState(false);
@@ -431,12 +450,15 @@ function App() {
   const [selectedColumn, setSelectedColumn] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<FilterMode>("exclude");
   const [caseInsensitive, setCaseInsensitive] = useState(false);
-  const [filtered, setFiltered] = useState<CsvTable | null>(null);
+  const [filtered, setFiltered] = useState<TablePreview | null>(null);
+  // The backend `FilteredStore` id of the full filter result, passed to sort/export so they act
+  // on every row, not just the visible preview. Null when there's no current filter result.
+  const [filteredId, setFilteredId] = useState<number | null>(null);
   const [filteredPage, setFilteredPage] = useState(1);
   // `filtered`/`comparison` stay in their original (computed) order; the sorted display lives
   // in a separate view (null = unsorted) so a third header click can drop back to it.
   // Recomputing the result clears both the view and its sort descriptor.
-  const [filteredView, setFilteredView] = useState<CsvTable | null>(null);
+  const [filteredView, setFilteredView] = useState<TablePreview | null>(null);
   const [filteredSort, setFilteredSort] = useState<SortState | null>(null);
 
   // Filter vs Compare. The case-insensitive toggle is shared across both modes.
@@ -444,11 +466,12 @@ function App() {
   const [commonCols, setCommonCols] = useState<string[]>([]);
   const [keyColumn, setKeyColumn] = useState<string | null>(null);
   const [valueColumn, setValueColumn] = useState<string | null>(null);
-  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [comparison, setComparison] = useState<ComparisonPreview | null>(null);
+  // The backend `ComparisonStore` id of the full compare result, passed to sort/export.
+  const [comparisonId, setComparisonId] = useState<number | null>(null);
   const [comparisonPage, setComparisonPage] = useState(1);
-  const [comparisonView, setComparisonView] = useState<ComparisonResult | null>(
-    null,
-  );
+  const [comparisonView, setComparisonView] =
+    useState<ComparisonPreview | null>(null);
   const [comparisonSort, setComparisonSort] = useState<SortState | null>(null);
 
   const columnIndex = selectedColumn === null ? null : Number(selectedColumn);
@@ -470,11 +493,12 @@ function App() {
       !columnValid
     ) {
       setFiltered(null);
+      setFilteredId(null);
       return;
     }
     const options: FilterOptions = { mode: filterMode, caseInsensitive };
     let cancelled = false;
-    invoke<CsvTable>("filter_csv", {
+    invoke<FilteredCsv>("filter_csv", {
       leftId,
       rightId,
       column: rightTable.headers[columnIndex],
@@ -482,7 +506,8 @@ function App() {
     })
       .then((result) => {
         if (cancelled) return;
-        setFiltered(result);
+        setFiltered(result.table);
+        setFilteredId(result.id);
         setFilteredPage(1);
         setFilteredView(null);
         setFilteredSort(null);
@@ -496,6 +521,7 @@ function App() {
           message: String(err),
         });
         setFiltered(null);
+        setFilteredId(null);
       });
     return () => {
       cancelled = true;
@@ -557,10 +583,11 @@ function App() {
       !compareValid
     ) {
       setComparison(null);
+      setComparisonId(null);
       return;
     }
     let cancelled = false;
-    invoke<ComparisonResult>("compare_csv", {
+    invoke<ComparedCsv>("compare_csv", {
       leftId,
       rightId,
       keyColumn: commonCols[keyIndex],
@@ -569,7 +596,8 @@ function App() {
     })
       .then((result) => {
         if (cancelled) return;
-        setComparison(result);
+        setComparison(result.result);
+        setComparisonId(result.id);
         setComparisonPage(1);
         setComparisonView(null);
         setComparisonSort(null);
@@ -583,6 +611,7 @@ function App() {
           message: String(err),
         });
         setComparison(null);
+        setComparisonId(null);
       });
     return () => {
       cancelled = true;
@@ -627,10 +656,10 @@ function App() {
         setSort(null);
       }
     } catch (err) {
-      console.error("Failed to load CSV:", err);
+      console.error("Failed to load file:", err);
       notifications.show({
         color: "red",
-        title: "Failed to load CSV",
+        title: "Failed to load file",
         message: String(err),
       });
     } finally {
@@ -701,7 +730,7 @@ function App() {
       return;
     }
     try {
-      const sorted = await invoke<CsvTable>("sort_csv", {
+      const sorted = await invoke<TablePreview>("sort_csv", {
         id,
         column: columnIndex,
         ascending: next.ascending,
@@ -715,7 +744,7 @@ function App() {
   }
 
   async function sortFiltered(columnIndex: number) {
-    if (!filtered) return;
+    if (filteredId === null) return;
     const requestId = ++filteredSortReq.current;
     const next = nextSort(filteredSort, columnIndex);
     setFilteredPage(1);
@@ -725,8 +754,9 @@ function App() {
       return;
     }
     try {
-      const sorted = await invoke<CsvTable>("sort_table", {
-        table: filtered,
+      // Sort the full filter result server-side (by id), not the visible preview.
+      const sorted = await invoke<TablePreview>("sort_filtered", {
+        id: filteredId,
         column: columnIndex,
         ascending: next.ascending,
       });
@@ -739,7 +769,7 @@ function App() {
   }
 
   async function sortComparisonResult(columnIndex: number) {
-    if (!comparison) return;
+    if (comparisonId === null) return;
     const requestId = ++comparisonSortReq.current;
     const next = nextSort(comparisonSort, columnIndex);
     setComparisonPage(1);
@@ -749,8 +779,9 @@ function App() {
       return;
     }
     try {
-      const sorted = await invoke<ComparisonResult>("sort_comparison", {
-        result: comparison,
+      // Sort the full compare result server-side (by id), not the visible preview.
+      const sorted = await invoke<ComparisonPreview>("sort_comparison", {
+        id: comparisonId,
         column: columnIndex,
         ascending: next.ascending,
       });
@@ -762,19 +793,30 @@ function App() {
     }
   }
 
+  // Maps a display `SortState` to the backend `SortSpec` (or null when unsorted), so an export
+  // writes the full data in the same order shown on screen.
+  function sortSpec(sort: SortState | null): {
+    column: number;
+    ascending: boolean;
+  } | null {
+    return sort ? { column: sort.index, ascending: sort.ascending } : null;
+  }
+
   async function exportResult() {
-    if (!filtered || filtered.rows.length === 0) return;
+    if (filteredId === null || !filtered || filtered.totalRows === 0) return;
     setExporting(true);
     try {
-      // Export what's on screen, including the current sort.
-      const table = filteredView ?? filtered;
-      // `save_csv` returns false when the user cancels the save dialog; nothing to do.
-      const saved = await invoke<boolean>("save_csv", { table });
+      // Export the full filter result server-side (by id), in the current on-screen sort order.
+      // `export_filtered` returns false when the user cancels the save dialog; nothing to do.
+      const saved = await invoke<boolean>("export_filtered", {
+        id: filteredId,
+        sort: sortSpec(filteredSort),
+      });
       if (saved) {
         notifications.show({
           color: "green",
           title: "Export complete",
-          message: "Filtered CSV saved.",
+          message: "Filtered spreadsheet saved.",
         });
       }
     } catch (err) {
@@ -789,20 +831,21 @@ function App() {
     }
   }
 
-  // Compare results export through the Rust `comparison_to_table` renderer, then `save_csv`.
   async function exportComparison() {
-    if (!comparison || comparison.rows.length === 0) return;
+    if (comparisonId === null || !comparison || comparison.totalRows === 0)
+      return;
     setExporting(true);
     try {
-      const table = await invoke<CsvTable>("comparison_to_table", {
-        result: comparisonView ?? comparison,
+      // Export the full compare result server-side (by id), in the current on-screen sort order.
+      const saved = await invoke<boolean>("export_comparison", {
+        id: comparisonId,
+        sort: sortSpec(comparisonSort),
       });
-      const saved = await invoke<boolean>("save_csv", { table });
       if (saved) {
         notifications.show({
           color: "green",
           title: "Export complete",
-          message: "Comparison CSV saved.",
+          message: "Comparison spreadsheet saved.",
         });
       }
     } catch (err) {
@@ -817,8 +860,8 @@ function App() {
     }
   }
 
-  const canExport = !!filtered && filtered.rows.length > 0;
-  const canExportComparison = !!comparison && comparison.rows.length > 0;
+  const canExport = !!filtered && filtered.totalRows > 0;
+  const canExportComparison = !!comparison && comparison.totalRows > 0;
   const columnOptions =
     rightTable?.headers.map((_, index) => ({
       value: String(index),
@@ -845,7 +888,7 @@ function App() {
     >
       <Group justify="center" pos="relative">
         <Title order={1} ta="center">
-          CSV Filter &amp; Compare
+          CSV / Excel Filter &amp; Compare
         </Title>
         <Button
           variant="default"
@@ -964,8 +1007,8 @@ function App() {
             ) : (
               <Text c="dimmed" fs="italic">
                 {leftTable && rightTable
-                  ? "Pick a column from the Right CSV to filter the Left CSV."
-                  : "Load both CSVs to filter."}
+                  ? "Pick a column from the right spreadsheet to filter the left spreadsheet."
+                  : "Load both CSV / Excel files to filter."}
               </Text>
             )}
           </>
@@ -1023,9 +1066,9 @@ function App() {
             ) : (
               <Text c="dimmed" fs="italic">
                 {!leftTable || !rightTable
-                  ? "Load both CSVs to compare."
+                  ? "Load both CSV / Excel files to compare."
                   : commonCols.length === 0
-                    ? "The two CSVs share no columns to compare."
+                    ? "The two spreadsheets share no columns to compare."
                     : "Pick key and value columns to compare."}
               </Text>
             )}
