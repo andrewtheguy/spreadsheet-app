@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Alert,
+  Box,
   Button,
   Group,
   Paper,
-  Stack,
   Table,
   Text,
   Title,
@@ -15,7 +15,10 @@ type CsvTable = { headers: string[]; rows: string[][] };
 
 function CsvTableView({ table }: { table: CsvTable }) {
   return (
-    <Table.ScrollContainer minWidth={0} style={{ flex: 1, minHeight: 0 }}>
+    // A bounded, scrollable region inside the panel's flex column: `minHeight: 0` lets it
+    // shrink below content size so `overflow: auto` scrolls instead of overflowing the
+    // panel. `stickyHeader` pins the header row against this scroll container.
+    <Box style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
       <Table stickyHeader striped withTableBorder withColumnBorders>
         <Table.Thead>
           <Table.Tr>
@@ -38,7 +41,7 @@ function CsvTableView({ table }: { table: CsvTable }) {
           ))}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </Box>
   );
 }
 
@@ -55,7 +58,14 @@ function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
     <Paper
       withBorder
       p="sm"
-      style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+      }}
     >
       <Group justify="space-between" mb="sm">
         <Title order={2} size="h4">
@@ -159,12 +169,31 @@ function App() {
   const mergedCount = merged?.rows.length ?? 0;
 
   return (
-    <Stack h="100vh" p="md" gap="md">
+    // Plain flex column we fully control: a 100vh box whose two row regions (the source
+    // panels and the merged panel) each take half the remaining height with `minHeight: 0`
+    // so they shrink and scroll internally instead of overflowing the viewport.
+    <Box
+      style={{
+        height: "100vh",
+        boxSizing: "border-box",
+        padding: "var(--mantine-spacing-md)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--mantine-spacing-md)",
+      }}
+    >
       <Title order={1} ta="center">
         Spreadsheet Merge
       </Title>
 
-      <Group grow align="stretch" style={{ flex: 1, minHeight: 0 }}>
+      <Box
+        style={{
+          display: "flex",
+          gap: "var(--mantine-spacing-md)",
+          flex: 1,
+          minHeight: 0,
+        }}
+      >
         <TablePanel
           title="Left"
           table={leftTable}
@@ -179,7 +208,7 @@ function App() {
           error={rightError}
           onLoad={() => loadCsv(setRightTable, setRightLoading, setRightError)}
         />
-      </Group>
+      </Box>
 
       <Paper
         withBorder
@@ -187,6 +216,7 @@ function App() {
         style={{
           flex: 1,
           minHeight: 0,
+          overflow: "hidden",
           display: "flex",
           flexDirection: "column",
         }}
@@ -227,7 +257,7 @@ function App() {
           </Text>
         )}
       </Paper>
-    </Stack>
+    </Box>
   );
 }
 
