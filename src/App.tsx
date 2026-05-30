@@ -1,17 +1,49 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Alert,
+  Box,
   Button,
   Group,
   Paper,
-  Stack,
   Table,
   Text,
   Title,
 } from "@mantine/core";
 
 type CsvTable = { headers: string[]; rows: string[][] };
+
+function CsvTableView({ table }: { table: CsvTable }) {
+  return (
+    // A bounded, scrollable region inside the panel's flex column: `minHeight: 0` lets it
+    // shrink below content size so `overflow: auto` scrolls instead of overflowing the
+    // panel. `stickyHeader` pins the header row against this scroll container.
+    <Box style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+      <Table stickyHeader striped withTableBorder withColumnBorders>
+        <Table.Thead>
+          <Table.Tr>
+            {table.headers.map((header, i) => (
+              <Table.Th key={i} style={{ whiteSpace: "nowrap" }}>
+                {header}
+              </Table.Th>
+            ))}
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {table.rows.map((row, r) => (
+            <Table.Tr key={r}>
+              {row.map((cell, c) => (
+                <Table.Td key={c} style={{ whiteSpace: "nowrap" }}>
+                  {cell}
+                </Table.Td>
+              ))}
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Box>
+  );
+}
 
 type TablePanelProps = {
   title: string;
@@ -26,7 +58,14 @@ function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
     <Paper
       withBorder
       p="sm"
-      style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+      }}
     >
       <Group justify="space-between" mb="sm">
         <Title order={2} size="h4">
@@ -44,30 +83,7 @@ function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
       )}
 
       {table ? (
-        <Table.ScrollContainer minWidth={0} style={{ flex: 1, minHeight: 0 }}>
-          <Table stickyHeader striped withTableBorder withColumnBorders>
-            <Table.Thead>
-              <Table.Tr>
-                {table.headers.map((header, i) => (
-                  <Table.Th key={i} style={{ whiteSpace: "nowrap" }}>
-                    {header}
-                  </Table.Th>
-                ))}
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {table.rows.map((row, r) => (
-                <Table.Tr key={r}>
-                  {row.map((cell, c) => (
-                    <Table.Td key={c} style={{ whiteSpace: "nowrap" }}>
-                      {cell}
-                    </Table.Td>
-                  ))}
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        </Table.ScrollContainer>
+        <CsvTableView table={table} />
       ) : (
         <Text c="dimmed" fs="italic">
           No spreadsheet loaded.
@@ -85,6 +101,36 @@ function App() {
   const [rightTable, setRightTable] = useState<CsvTable | null>(null);
   const [rightLoading, setRightLoading] = useState(false);
   const [rightError, setRightError] = useState("");
+
+  const [exporting, setExporting] = useState(false);
+  const [mergedError, setMergedError] = useState("");
+  const [merged, setMerged] = useState<CsvTable | null>(null);
+
+  // The merge runs in the Rust `sheet-core` crate via the `merge_csv` command. Recompute
+  // it whenever either source table changes; a cancellation flag drops a stale response if
+  // the inputs change again before it resolves.
+  useEffect(() => {
+    if (!leftTable || !rightTable) {
+      setMerged(null);
+      setMergedError("");
+      return;
+    }
+    let cancelled = false;
+    setMergedError("");
+    invoke<CsvTable>("merge_csv", { left: leftTable, right: rightTable })
+      .then((result) => {
+        if (!cancelled) setMerged(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to merge:", err);
+        setMergedError(String(err));
+        setMerged(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [leftTable, rightTable]);
 
   async function loadCsv(
     setTable: (table: CsvTable) => void,
@@ -105,13 +151,49 @@ function App() {
     }
   }
 
+  async function exportResult() {
+    if (!merged || merged.rows.length === 0) return;
+    setExporting(true);
+    setMergedError("");
+    try {
+      // `save_csv` returns false when the user cancels the save dialog; nothing to do.
+      await invoke<boolean>("save_csv", { table: merged });
+    } catch (err) {
+      console.error("Failed to export result:", err);
+      setMergedError(String(err));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  const mergedCount = merged?.rows.length ?? 0;
+
   return (
-    <Stack h="100vh" p="md" gap="md">
+    // Plain flex column we fully control: a 100vh box whose two row regions (the source
+    // panels and the merged panel) each take half the remaining height with `minHeight: 0`
+    // so they shrink and scroll internally instead of overflowing the viewport.
+    <Box
+      style={{
+        height: "100vh",
+        boxSizing: "border-box",
+        padding: "var(--mantine-spacing-md)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--mantine-spacing-md)",
+      }}
+    >
       <Title order={1} ta="center">
         Spreadsheet Merge
       </Title>
 
-      <Group grow align="stretch" style={{ flex: 1, minHeight: 0 }}>
+      <Box
+        style={{
+          display: "flex",
+          gap: "var(--mantine-spacing-md)",
+          flex: 1,
+          minHeight: 0,
+        }}
+      >
         <TablePanel
           title="Left"
           table={leftTable}
@@ -126,18 +208,56 @@ function App() {
           error={rightError}
           onLoad={() => loadCsv(setRightTable, setRightLoading, setRightError)}
         />
-      </Group>
+      </Box>
 
       <Paper
         withBorder
         p="sm"
-        style={{ borderStyle: "dashed", minHeight: 120 }}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+        }}
       >
-        <Text c="dimmed" fs="italic">
-          placeholder for now
-        </Text>
+        <Group justify="space-between" mb="sm">
+          <Group gap="xs">
+            <Title order={2} size="h4">
+              Merged
+            </Title>
+            {merged && (
+              <Text c="dimmed" size="sm">
+                {mergedCount} {mergedCount === 1 ? "row" : "rows"}
+              </Text>
+            )}
+          </Group>
+          <Button
+            onClick={exportResult}
+            loading={exporting}
+            disabled={mergedCount === 0}
+          >
+            Export result
+          </Button>
+        </Group>
+
+        {mergedError && (
+          <Alert color="red" mb="sm">
+            {mergedError}
+          </Alert>
+        )}
+
+        {merged && mergedCount > 0 ? (
+          <CsvTableView table={merged} />
+        ) : (
+          <Text c="dimmed" fs="italic">
+            {leftTable && rightTable
+              ? "No left rows match the right CSV's first column."
+              : "Load both CSVs to see matched rows."}
+          </Text>
+        )}
       </Paper>
-    </Stack>
+    </Box>
   );
 }
 
