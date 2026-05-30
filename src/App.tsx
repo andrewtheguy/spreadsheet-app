@@ -447,7 +447,6 @@ function App() {
   const compareValid =
     keyIndex !== null &&
     valueIndex !== null &&
-    keyIndex !== valueIndex &&
     keyIndex < commonCols.length &&
     valueIndex < commonCols.length;
 
@@ -786,9 +785,7 @@ function App() {
                   ? "Load both CSVs to compare."
                   : commonCols.length === 0
                     ? "The two CSVs share no columns to compare."
-                    : keyIndex !== null && keyIndex === valueIndex
-                      ? "Key and value columns must differ."
-                      : "Pick key and value columns to compare."}
+                    : "Pick key and value columns to compare."}
               </Text>
             )}
           </>
