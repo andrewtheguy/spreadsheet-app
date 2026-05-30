@@ -1,19 +1,49 @@
 use std::fs::File;
 
-use sheet_core::{ComparisonResult, CsvTable, FilterOptions};
+use sheet_core::{ComparisonPreview, ComparisonResult, CsvTable, FilterOptions, TablePreview};
 
 mod store;
-use store::TableStore;
+use store::{LatestSlot, TableStore};
 
-// A parsed CSV paired with the path it was loaded from, so the frontend can display the
-// source file in the panel title. `id` is the handle into the backend `TableStore`; the
-// frontend passes it back to `filter_csv` / `compare_csv` / `common_columns` instead of
-// re-shipping the whole table on every recompute.
+// The backend store of derived results: at most one filter result and one compare result, each
+// the latest computed. Sort/export reference them by id so the full data never crosses IPC.
+type FilteredStore = LatestSlot<CsvTable>;
+type ComparisonStore = LatestSlot<ComparisonResult>;
+
+// A loaded spreadsheet handed back to the frontend: a bounded `TablePreview` for display paired
+// with the source path (shown in the panel title) and the `TableStore` id. The frontend passes
+// `id` back to `filter_csv` / `compare_csv` / `common_columns` / `sort_csv` instead of
+// re-shipping the whole table; the full table stays in the store.
 #[derive(serde::Serialize)]
 struct LoadedCsv {
     id: u64,
-    table: CsvTable,
+    table: TablePreview,
     path: String,
+}
+
+// The result of `filter_csv`: a bounded preview for display plus the `FilteredStore` id the
+// frontend passes back to `sort_filtered` / `export_filtered` to act on the full filtered data.
+#[derive(serde::Serialize)]
+struct FilteredCsv {
+    id: u64,
+    table: TablePreview,
+}
+
+// The result of `compare_csv`: a bounded preview plus the `ComparisonStore` id the frontend
+// passes back to `sort_comparison` / `export_comparison`.
+#[derive(serde::Serialize)]
+struct ComparedCsv {
+    id: u64,
+    result: ComparisonPreview,
+}
+
+// A sort to apply to the full dataset before export, mirroring the frontend's on-screen sort
+// (`None` exports in the original computed order). Fields are single words, so Tauri's arg
+// case-conversion needs no `serde(rename_all)`.
+#[derive(serde::Deserialize)]
+struct SortSpec {
+    column: usize,
+    ascending: bool,
 }
 
 // Opens a native file picker for a CSV/Excel file, parses it (via `sheet-core`), and returns
@@ -66,25 +96,26 @@ async fn load_csv<R: tauri::Runtime>(
             ));
         }
     };
-    // Hold the table in the backend store (evicting the side's previous table) and hand its
-    // id back alongside the data the frontend renders.
-    let id = store.insert(table.clone(), replace);
+    // Hold the full table in the backend store (evicting the side's previous table) and hand its
+    // id back alongside a bounded preview the frontend renders.
+    let preview = TablePreview::from_table(&table);
+    let id = store.insert(table, replace);
     Ok(Some(LoadedCsv {
         id,
-        table,
+        table: preview,
         path: path.display().to_string(),
     }))
 }
 
-// Opens a native save dialog for a `.csv` file and writes `table` to it (via `sheet-core`).
-// Returns `Ok(false)` when the user cancels the dialog so the frontend can no-op.
-#[tauri::command]
-async fn save_csv<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    table: CsvTable,
+// Opens a native ".csv" save dialog (on the UI thread, as macOS requires) and writes `table` to
+// the chosen path via `sheet-core`. Returns `Ok(false)` when the user cancels so the caller can
+// no-op. Shared by `export_filtered` / `export_comparison`, which write the *full* dataset.
+async fn save_table<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    table: &CsvTable,
 ) -> Result<bool, String> {
-    // Same main-thread dialog dance as `load_csv`: the native dialog must run on the UI
-    // thread on macOS, so schedule it and hand the chosen path back over a channel.
+    // Same main-thread dialog dance as `load_csv`: schedule the modal on the UI thread and hand
+    // the chosen path back over a channel.
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
         let path = rfd::FileDialog::new()
@@ -101,26 +132,34 @@ async fn save_csv<R: tauri::Runtime>(
 
     let file =
         File::create(&path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
-    sheet_core::write_csv(file, &table)
+    sheet_core::write_csv(file, table)
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     Ok(true)
 }
 
 // Filters `left`'s rows by whether their value in `column` appears in `right`'s same-named
-// column. Both tables are referenced by their `TableStore` id rather than passed by value,
-// so a recompute ships two ids instead of two full tables. The filtering logic lives in the
-// `sheet-core` crate.
+// column. Both tables are referenced by their `TableStore` id rather than passed by value, so a
+// recompute ships two ids instead of two full tables. The full filtered table is held in the
+// `FilteredStore` (replacing the previous result) and only a bounded preview is returned, paired
+// with the store id that `sort_filtered` / `export_filtered` use. Filtering lives in `sheet-core`.
 #[tauri::command]
 fn filter_csv(
     store: tauri::State<'_, TableStore>,
+    filtered: tauri::State<'_, FilteredStore>,
     left_id: u64,
     right_id: u64,
     column: String,
     options: FilterOptions,
-) -> Result<CsvTable, String> {
+) -> Result<FilteredCsv, String> {
     let left = store.get(left_id)?;
     let right = store.get(right_id)?;
-    Ok(sheet_core::filter_rows(&left, &right, &column, &options))
+    let result = sheet_core::filter_rows(&left, &right, &column, &options);
+    let preview = TablePreview::from_table(&result);
+    let id = filtered.set(result);
+    Ok(FilteredCsv {
+        id,
+        table: preview,
+    })
 }
 
 // Header names present in both tables — the candidate key/value columns for `compare_csv`.
@@ -136,59 +175,111 @@ fn common_columns(
 }
 
 // VLOOKUP-style diff of `left` vs `right` by `key_column`, comparing `value_column`. Both
-// tables are referenced by their `TableStore` id. The comparison logic lives in the
-// `sheet-core` crate.
+// tables are referenced by their `TableStore` id. The full result is held in the
+// `ComparisonStore` (replacing the previous one) and only a bounded preview is returned, paired
+// with the store id that `sort_comparison` / `export_comparison` use. Logic lives in `sheet-core`.
 #[tauri::command]
 fn compare_csv(
     store: tauri::State<'_, TableStore>,
+    comparison: tauri::State<'_, ComparisonStore>,
     left_id: u64,
     right_id: u64,
     key_column: String,
     value_column: String,
     case_insensitive: bool,
-) -> Result<ComparisonResult, String> {
+) -> Result<ComparedCsv, String> {
     let left = store.get(left_id)?;
     let right = store.get(right_id)?;
-    Ok(sheet_core::compare(
-        &left,
-        &right,
-        &key_column,
-        &value_column,
-        case_insensitive,
-    ))
+    let result = sheet_core::compare(&left, &right, &key_column, &value_column, case_insensitive);
+    let preview = ComparisonPreview::from_result(&result);
+    let id = comparison.set(result);
+    Ok(ComparedCsv {
+        id,
+        result: preview,
+    })
 }
 
-// Renders a comparison result as a four-column table for export via `save_csv`.
-#[tauri::command]
-fn comparison_to_table(result: ComparisonResult) -> CsvTable {
-    sheet_core::comparison_to_table(&result)
-}
-
-// Returns a stored table (the Left/Right source panels, referenced by id) reordered by the
-// `column` header index for display. The store copy is left untouched, so filter/compare
-// operations keep their original ordering.
+// Returns a stored source table (Left/Right panel, by `TableStore` id) reordered by the `column`
+// header index, as a bounded preview. The full table is sorted server-side so the preview's
+// first rows reflect the *global* order; the store copy is left untouched, so filter/compare
+// keep their original ordering.
 #[tauri::command]
 fn sort_csv(
     store: tauri::State<'_, TableStore>,
     id: u64,
     column: usize,
     ascending: bool,
-) -> Result<CsvTable, String> {
+) -> Result<TablePreview, String> {
     let table = store.get(id)?;
-    Ok(sheet_core::sort_rows(&table, column, ascending))
+    let sorted = sheet_core::sort_rows(&table, column, ascending);
+    Ok(TablePreview::from_table(&sorted))
 }
 
-// Reorders a table that isn't held in the store — the filter result — by `column` for
-// display. The (already-computed) table is passed by value since this is a one-off click.
+// Reorders the stored filter result (by `FilteredStore` id) by `column`, returning a bounded
+// preview of the globally-sorted full data.
 #[tauri::command]
-fn sort_table(table: CsvTable, column: usize, ascending: bool) -> CsvTable {
-    sheet_core::sort_rows(&table, column, ascending)
+fn sort_filtered(
+    filtered: tauri::State<'_, FilteredStore>,
+    id: u64,
+    column: usize,
+    ascending: bool,
+) -> Result<TablePreview, String> {
+    let table = filtered.get(id)?;
+    let sorted = sheet_core::sort_rows(&table, column, ascending);
+    Ok(TablePreview::from_table(&sorted))
 }
 
-// Reorders a comparison result by `column` (0=key, 1=left, 2=right, 3=status) for display.
+// Reorders the stored comparison result (by `ComparisonStore` id) by `column` (0=key, 1=left,
+// 2=right, 3=status), returning a bounded preview of the globally-sorted full data.
 #[tauri::command]
-fn sort_comparison(result: ComparisonResult, column: usize, ascending: bool) -> ComparisonResult {
-    sheet_core::sort_comparison(&result, column, ascending)
+fn sort_comparison(
+    comparison: tauri::State<'_, ComparisonStore>,
+    id: u64,
+    column: usize,
+    ascending: bool,
+) -> Result<ComparisonPreview, String> {
+    let result = comparison.get(id)?;
+    let sorted = sheet_core::sort_comparison(&result, column, ascending);
+    Ok(ComparisonPreview::from_result(&sorted))
+}
+
+// Exports the full stored filter result (by `FilteredStore` id) as CSV, applying `sort` first so
+// the file matches the on-screen order. Opens a native save dialog; returns `Ok(false)` on
+// cancel. Unlike the previews, this writes *every* row.
+#[tauri::command]
+async fn export_filtered<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    filtered: tauri::State<'_, FilteredStore>,
+    id: u64,
+    sort: Option<SortSpec>,
+) -> Result<bool, String> {
+    let table = filtered.get(id)?;
+    let table = match sort {
+        Some(SortSpec { column, ascending }) => sheet_core::sort_rows(&table, column, ascending),
+        None => (*table).clone(),
+    };
+    save_table(&app, &table).await
+}
+
+// Exports the full stored comparison result (by `ComparisonStore` id) as a four-column CSV,
+// applying `sort` first to match the on-screen order. Opens a native save dialog; returns
+// `Ok(false)` on cancel. Writes every row.
+#[tauri::command]
+async fn export_comparison<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    comparison: tauri::State<'_, ComparisonStore>,
+    id: u64,
+    sort: Option<SortSpec>,
+) -> Result<bool, String> {
+    let result = comparison.get(id)?;
+    let result = match sort {
+        Some(SortSpec { column, ascending }) => {
+            sheet_core::sort_comparison(&result, column, ascending)
+        }
+        None => (*result).clone(),
+    };
+    let table = sheet_core::comparison_to_table(&result);
+    save_table(&app, &table).await
 }
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
@@ -220,9 +311,13 @@ fn open_external(url: String) -> Result<(), String> {
 // and the default `wry` feature is disabled in Cargo.toml.
 pub fn run() {
     tauri::Builder::default()
-        // Holds loaded tables so filter/compare/common-columns can reference them by id
-        // instead of re-receiving full table payloads on every recompute.
+        // Holds loaded source tables so filter/compare/common-columns/sort can reference them by
+        // id instead of re-receiving full table payloads on every recompute.
         .manage(TableStore::default())
+        // Hold the latest filter and compare results server-side, so sort/export operate on the
+        // full data while the UI only ever receives a bounded preview.
+        .manage(FilteredStore::default())
+        .manage(ComparisonStore::default())
         // Chromium's password manager (OSCrypt) stores its "Safe Storage" key in the
         // macOS Keychain. Each rebuild changes the app binary's identity, so macOS
         // re-prompts for Keychain access on every launch. We don't use Chromium's
@@ -235,14 +330,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_external,
             load_csv,
-            save_csv,
             filter_csv,
             common_columns,
             compare_csv,
-            comparison_to_table,
             sort_csv,
-            sort_table,
-            sort_comparison
+            sort_filtered,
+            sort_comparison,
+            export_filtered,
+            export_comparison
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

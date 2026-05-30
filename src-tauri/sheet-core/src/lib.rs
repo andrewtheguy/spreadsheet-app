@@ -8,12 +8,66 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 
-/// A CSV file parsed into a header row plus data rows. Serialized to the frontend for
-/// display (`load_csv`) and deserialized back from it for export (`save_csv`).
+/// A CSV file parsed into a header row plus data rows. Held in the backend store and used by
+/// all the row-matching logic; the UI only ever receives a bounded [`TablePreview`] of it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CsvTable {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+}
+
+/// Maximum rows shipped to the UI for display. Extremely large tables would otherwise hang the
+/// frontend (the whole payload crosses IPC and lands in JS state) even though the grid only
+/// renders a page at a time. The full table stays server-side for sort/filter/compare/export.
+pub const MAX_PREVIEW_ROWS: usize = 1000;
+
+/// A bounded view of a [`CsvTable`] for the UI: the first [`MAX_PREVIEW_ROWS`] rows plus the
+/// true total, so the frontend renders quickly and can still show "first 1,000 of N rows".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePreview {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub total_rows: usize,
+}
+
+impl TablePreview {
+    /// Builds a preview of `table`, copying at most [`MAX_PREVIEW_ROWS`] rows and recording the
+    /// full row count in `total_rows`.
+    pub fn from_table(table: &CsvTable) -> Self {
+        TablePreview {
+            headers: table.headers.clone(),
+            rows: table.rows.iter().take(MAX_PREVIEW_ROWS).cloned().collect(),
+            total_rows: table.rows.len(),
+        }
+    }
+}
+
+/// A bounded view of a [`ComparisonResult`] for the UI, mirroring [`TablePreview`]. The
+/// `summary` is computed over the full result, so its tallies stay accurate even when `rows`
+/// is capped; `total_rows` is the full row count.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonPreview {
+    pub rows: Vec<ComparisonRow>,
+    pub key_column: String,
+    pub value_column: String,
+    pub summary: ComparisonSummary,
+    pub total_rows: usize,
+}
+
+impl ComparisonPreview {
+    /// Builds a preview of `result`, copying at most [`MAX_PREVIEW_ROWS`] rows and recording the
+    /// full row count in `total_rows`.
+    pub fn from_result(result: &ComparisonResult) -> Self {
+        ComparisonPreview {
+            rows: result.rows.iter().take(MAX_PREVIEW_ROWS).cloned().collect(),
+            key_column: result.key_column.clone(),
+            value_column: result.value_column.clone(),
+            summary: result.summary.clone(),
+            total_rows: result.rows.len(),
+        }
+    }
 }
 
 /// Parses CSV from `reader`, treating the first record as headers. Ragged rows are
@@ -982,6 +1036,69 @@ mod tests {
         assert_eq!(result.summary.total, 1);
         assert_eq!(result.rows[0].status, ComparisonStatus::Matched);
         assert_eq!(result.rows[0].left_value.as_deref(), Some("2"));
+    }
+
+    // --- previews ---
+
+    #[test]
+    fn table_preview_passes_through_when_under_cap() {
+        let t = table(&["a"], &[&["1"], &["2"]]);
+        let preview = TablePreview::from_table(&t);
+        assert_eq!(preview.headers, vec!["a".to_string()]);
+        assert_eq!(preview.rows, rows(&[&["1"], &["2"]]));
+        assert_eq!(preview.total_rows, 2);
+    }
+
+    #[test]
+    fn table_preview_caps_rows_but_reports_full_total() {
+        let data: Vec<Vec<String>> = (0..MAX_PREVIEW_ROWS + 50)
+            .map(|i| vec![i.to_string()])
+            .collect();
+        let t = CsvTable {
+            headers: vec!["a".to_string()],
+            rows: data,
+        };
+        let preview = TablePreview::from_table(&t);
+        assert_eq!(preview.rows.len(), MAX_PREVIEW_ROWS);
+        assert_eq!(preview.total_rows, MAX_PREVIEW_ROWS + 50);
+        // The cap keeps the *first* rows, in order.
+        assert_eq!(preview.rows[0], vec!["0".to_string()]);
+        assert_eq!(
+            preview.rows[MAX_PREVIEW_ROWS - 1],
+            vec![(MAX_PREVIEW_ROWS - 1).to_string()]
+        );
+    }
+
+    #[test]
+    fn comparison_preview_caps_rows_and_keeps_full_summary() {
+        let rows: Vec<ComparisonRow> = (0..MAX_PREVIEW_ROWS + 10)
+            .map(|i| ComparisonRow {
+                key: i.to_string(),
+                left_value: Some("x".into()),
+                right_value: Some("x".into()),
+                status: ComparisonStatus::Matched,
+            })
+            .collect();
+        let result = ComparisonResult {
+            rows,
+            key_column: "k".into(),
+            value_column: "v".into(),
+            summary: ComparisonSummary {
+                total: MAX_PREVIEW_ROWS + 10,
+                matched: MAX_PREVIEW_ROWS + 10,
+                diff: 0,
+                only_left: 0,
+                only_right: 0,
+            },
+        };
+        let preview = ComparisonPreview::from_result(&result);
+        assert_eq!(preview.rows.len(), MAX_PREVIEW_ROWS);
+        assert_eq!(preview.total_rows, MAX_PREVIEW_ROWS + 10);
+        // Summary reflects the full result, not the capped rows.
+        assert_eq!(preview.summary.total, MAX_PREVIEW_ROWS + 10);
+        assert_eq!(preview.summary.matched, MAX_PREVIEW_ROWS + 10);
+        assert_eq!(preview.key_column, "k");
+        assert_eq!(preview.value_column, "v");
     }
 
     #[test]
