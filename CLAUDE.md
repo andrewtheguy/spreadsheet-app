@@ -3,3 +3,4 @@
 - run cargo clippy after changes
 - no cargo fmt
 - desktop mac and windows only, no mobile or linux support
+- implement backend as much as possible in Rust, so that the backend is more ui agnostic and can be reused in other contexts
