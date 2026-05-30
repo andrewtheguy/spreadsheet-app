@@ -50,37 +50,81 @@ pub fn write_csv<W: Write>(writer: W, table: &CsvTable) -> Result<(), csv::Error
     Ok(())
 }
 
-/// Returns the rows of `left` whose first column also appears in `right`'s first column.
-///
-/// First-column values are compared after trimming surrounding whitespace, and the match
-/// is case-sensitive. Blank or whitespace-only keys are skipped on both sides, so a blank
-/// left key never matches and a blank right key never becomes a match target. Matching
-/// rows keep their original (untrimmed) cells, preserving order and duplicates.
-pub fn matching_rows(left: &CsvTable, right: &CsvTable) -> Vec<Vec<String>> {
-    let right_keys: HashSet<&str> = right
-        .rows
-        .iter()
-        .filter_map(|row| row.first())
-        .map(|cell| cell.trim())
-        .filter(|key| !key.is_empty())
-        .collect();
-
-    left.rows
-        .iter()
-        .filter(|row| {
-            let key = row.first().map_or("", |cell| cell.trim());
-            !key.is_empty() && right_keys.contains(key)
-        })
-        .cloned()
-        .collect()
+/// How [`filter_rows`] treats rows whose value is present in `right`'s column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterMode {
+    /// Drop rows whose value appears in `right`'s column (the default).
+    Exclude,
+    /// Keep only rows whose value appears in `right`'s column.
+    Include,
 }
 
-/// Builds the merged result: `left`'s headers paired with only the rows whose first column
-/// matches `right`'s first column (see [`matching_rows`]).
-pub fn merge(left: &CsvTable, right: &CsvTable) -> CsvTable {
+/// Options controlling [`filter_rows`]. `camelCase` on the wire so the frontend can send
+/// `caseInsensitive` (Tauri only auto-converts top-level command args, not nested fields).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterOptions {
+    pub mode: FilterMode,
+    /// When true, values are compared case-insensitively.
+    pub case_insensitive: bool,
+}
+
+/// Index of the first header equal to `name`, if any.
+pub fn column_index(table: &CsvTable, name: &str) -> Option<usize> {
+    table.headers.iter().position(|header| header == name)
+}
+
+/// Filters `left`'s rows by whether their value in the `column` (resolved by header name)
+/// appears among `right`'s values in that same-named column.
+///
+/// The column is resolved independently in each table, so it may sit at different positions
+/// on the two sides. If `right` lacks the column, `left` is returned unchanged. Comparison
+/// is exact (optionally case-insensitive via [`FilterOptions::case_insensitive`]); a `left`
+/// table that lacks the column never matches. `Include` keeps matching rows, `Exclude` drops
+/// them. Kept rows preserve their original cells, order, and duplicates.
+pub fn filter_rows(
+    left: &CsvTable,
+    right: &CsvTable,
+    column: &str,
+    opts: &FilterOptions,
+) -> CsvTable {
+    let Some(right_idx) = column_index(right, column) else {
+        return left.clone();
+    };
+    let left_idx = column_index(left, column);
+
+    let normalize = |value: &str| -> String {
+        if opts.case_insensitive {
+            value.to_lowercase()
+        } else {
+            value.to_owned()
+        }
+    };
+
+    // Rows are header-width (see `parse_csv`), so the cell at `right_idx` is always present.
+    let right_values: HashSet<String> = right
+        .rows
+        .iter()
+        .map(|row| normalize(&row[right_idx]))
+        .collect();
+
+    let rows = left
+        .rows
+        .iter()
+        .filter(|row| {
+            let in_set = left_idx.is_some_and(|i| right_values.contains(&normalize(&row[i])));
+            match opts.mode {
+                FilterMode::Include => in_set,
+                FilterMode::Exclude => !in_set,
+            }
+        })
+        .cloned()
+        .collect();
+
     CsvTable {
         headers: left.headers.clone(),
-        rows: matching_rows(left, right),
+        rows,
     }
 }
 
@@ -144,71 +188,79 @@ mod tests {
         assert!(out.contains("\"x,y\""), "comma cell should be quoted: {out}");
     }
 
-    // --- matching_rows / merge ---
+    // --- filter_rows ---
+
+    fn opts(mode: FilterMode, case_insensitive: bool) -> FilterOptions {
+        FilterOptions {
+            mode,
+            case_insensitive,
+        }
+    }
 
     #[test]
-    fn keeps_only_left_rows_with_matching_first_column() {
+    fn exclude_drops_rows_whose_value_is_in_right() {
         let left = table(
-            &["k", "v"],
+            &["id", "name"],
             &[&["A", "Apple"], &["B", "Banana"], &["C", "Cherry"]],
         );
-        let right = table(&["k"], &[&["B"], &["C"]]);
-        assert_eq!(
-            matching_rows(&left, &right),
-            rows(&[&["B", "Banana"], &["C", "Cherry"]])
-        );
+        let right = table(&["id"], &[&["B"], &["C"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Exclude, false));
+        assert_eq!(result.headers, vec!["id".to_string(), "name".to_string()]);
+        assert_eq!(result.rows, rows(&[&["A", "Apple"]]));
     }
 
     #[test]
-    fn skips_blank_left_keys() {
+    fn include_keeps_only_rows_whose_value_is_in_right() {
         let left = table(
-            &["k", "v"],
-            &[&["", "blank"], &["   ", "spaces"], &["B", "Banana"]],
+            &["id", "name"],
+            &[&["A", "Apple"], &["B", "Banana"], &["C", "Cherry"]],
         );
-        let right = table(&["k"], &[&["B"], &[""]]);
-        assert_eq!(matching_rows(&left, &right), rows(&[&["B", "Banana"]]));
+        let right = table(&["id"], &[&["B"], &["C"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Include, false));
+        assert_eq!(result.rows, rows(&[&["B", "Banana"], &["C", "Cherry"]]));
     }
 
     #[test]
-    fn blank_right_keys_are_not_match_targets() {
-        let left = table(&["k"], &[&[""]]);
-        let right = table(&["k"], &[&[""], &["  "]]);
-        assert!(matching_rows(&left, &right).is_empty());
+    fn case_sensitive_by_default() {
+        let left = table(&["id"], &[&["b"], &["B"]]);
+        let right = table(&["id"], &[&["B"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Include, false));
+        assert_eq!(result.rows, rows(&[&["B"]]));
     }
 
     #[test]
-    fn trims_surrounding_whitespace_on_both_sides() {
-        let left = table(&["k", "v"], &[&["  B  ", "Banana"]]);
-        let right = table(&["k"], &[&[" B "]]);
-        assert_eq!(matching_rows(&left, &right), rows(&[&["  B  ", "Banana"]]));
+    fn case_insensitive_matches_regardless_of_case() {
+        let left = table(&["id"], &[&["b"], &["B"], &["c"]]);
+        let right = table(&["id"], &[&["B"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Include, true));
+        assert_eq!(result.rows, rows(&[&["b"], &["B"]]));
     }
 
     #[test]
-    fn matching_is_case_sensitive() {
-        let left = table(&["k", "v"], &[&["b", "lower"], &["B", "upper"]]);
-        let right = table(&["k"], &[&["B"]]);
-        assert_eq!(matching_rows(&left, &right), rows(&[&["B", "upper"]]));
+    fn column_missing_in_right_returns_left_unchanged() {
+        let left = table(&["id", "name"], &[&["A", "Apple"], &["B", "Banana"]]);
+        let right = table(&["other"], &[&["A"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Exclude, false));
+        assert_eq!(result.rows, left.rows);
+    }
+
+    #[test]
+    fn resolves_column_by_name_at_different_indices() {
+        // "id" is column 1 on the left but column 0 on the right.
+        let left = table(&["name", "id"], &[&["Apple", "A"], &["Banana", "B"]]);
+        let right = table(&["id", "extra"], &[&["B", "x"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Include, false));
+        assert_eq!(result.rows, rows(&[&["Banana", "B"]]));
     }
 
     #[test]
     fn preserves_duplicate_left_rows_and_order() {
         let left = table(
-            &["k", "v"],
+            &["id", "v"],
             &[&["B", "first"], &["A", "a"], &["B", "second"]],
         );
-        let right = table(&["k"], &[&["B"]]);
-        assert_eq!(
-            matching_rows(&left, &right),
-            rows(&[&["B", "first"], &["B", "second"]])
-        );
-    }
-
-    #[test]
-    fn merge_keeps_left_headers_with_matched_rows() {
-        let left = table(&["id", "name"], &[&["A", "Apple"], &["B", "Banana"]]);
-        let right = table(&["other"], &[&["B"]]);
-        let merged = merge(&left, &right);
-        assert_eq!(merged.headers, vec!["id".to_string(), "name".to_string()]);
-        assert_eq!(merged.rows, rows(&[&["B", "Banana"]]));
+        let right = table(&["id"], &[&["B"]]);
+        let result = filter_rows(&left, &right, "id", &opts(FilterMode::Include, false));
+        assert_eq!(result.rows, rows(&[&["B", "first"], &["B", "second"]]));
     }
 }

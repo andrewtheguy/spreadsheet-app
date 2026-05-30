@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use sheet_core::CsvTable;
+use sheet_core::{CsvTable, FilterOptions};
 
 // A parsed CSV paired with the path it was loaded from, so the frontend can display the
 // source file in the panel title.
@@ -56,7 +56,7 @@ async fn save_csv<R: tauri::Runtime>(
     app.run_on_main_thread(move || {
         let path = rfd::FileDialog::new()
             .add_filter("CSV", &["csv"])
-            .set_file_name("merged.csv")
+            .set_file_name("filtered.csv")
             .save_file();
         let _ = tx.send(path);
     })
@@ -73,11 +73,11 @@ async fn save_csv<R: tauri::Runtime>(
     Ok(true)
 }
 
-// Computes the merged result — `left`'s rows whose first column appears in `right`'s first
-// column. The matching logic lives in the `sheet-core` crate.
+// Filters `left`'s rows by whether their value in `column` appears in `right`'s same-named
+// column. The filtering logic lives in the `sheet-core` crate.
 #[tauri::command]
-fn merge_csv(left: CsvTable, right: CsvTable) -> CsvTable {
-    sheet_core::merge(&left, &right)
+fn filter_csv(left: CsvTable, right: CsvTable, column: String, options: FilterOptions) -> CsvTable {
+    sheet_core::filter_rows(&left, &right, &column, &options)
 }
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
@@ -122,7 +122,7 @@ pub fn run() {
             open_external,
             load_csv,
             save_csv,
-            merge_csv
+            filter_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
