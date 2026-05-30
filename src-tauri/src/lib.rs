@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use sheet_core::{CsvTable, FilterOptions};
+use sheet_core::{ComparisonResult, CsvTable, FilterOptions};
 
 // A parsed CSV paired with the path it was loaded from, so the frontend can display the
 // source file in the panel title.
@@ -80,6 +80,31 @@ fn filter_csv(left: CsvTable, right: CsvTable, column: String, options: FilterOp
     sheet_core::filter_rows(&left, &right, &column, &options)
 }
 
+// Header names present in both tables — the candidate key/value columns for `compare_csv`.
+#[tauri::command]
+fn common_columns(left: CsvTable, right: CsvTable) -> Vec<String> {
+    sheet_core::common_columns(&left, &right)
+}
+
+// VLOOKUP-style diff of `left` vs `right` by `key_column`, comparing `value_column`. The
+// comparison logic lives in the `sheet-core` crate.
+#[tauri::command]
+fn compare_csv(
+    left: CsvTable,
+    right: CsvTable,
+    key_column: String,
+    value_column: String,
+    case_insensitive: bool,
+) -> ComparisonResult {
+    sheet_core::compare(&left, &right, &key_column, &value_column, case_insensitive)
+}
+
+// Renders a comparison result as a four-column table for export via `save_csv`.
+#[tauri::command]
+fn comparison_to_table(result: ComparisonResult) -> CsvTable {
+    sheet_core::comparison_to_table(&result)
+}
+
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
 // links inside the embedded Chromium webview, so the frontend routes external links
 // here instead.
@@ -122,7 +147,10 @@ pub fn run() {
             open_external,
             load_csv,
             save_csv,
-            filter_csv
+            filter_csv,
+            common_columns,
+            compare_csv,
+            comparison_to_table
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
