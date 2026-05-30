@@ -6,6 +6,36 @@ Migrate the **Filter** and **Compare** operations from
 crate. This is a living roadmap executed phase by phase; update it as phases
 land.
 
+## Status — ✅ Complete (2026-05-29)
+
+All three phases shipped. The app's two operations (Filter, Compare) are
+implemented in `sheet-core` and exposed through thin Tauri commands; the old
+merge scaffolding is gone.
+
+| Phase | Status | Outcome |
+| ----- | ------ | ------- |
+| 0 — Remove merge scaffolding | ✅ Done | `merge`/`matching_rows`/`merge_csv` + Merged panel deleted |
+| 1 — Filtering | ✅ Done | `filter_rows`/`filter_csv`; column Select + Exclude/Include + case-insensitive |
+| 2 — Compare | ✅ Done | `compare`/`common_columns`/`comparison_to_table`; Filter\|Compare switcher, status-tinted table, summary badges |
+
+App title is now **"CSV Filter & Compare"**. Verification: `cargo test -p
+sheet-core` (20 passing), `cargo clippy` clean, `bunx tsc --noEmit` clean, app
+launches and renders. The interactive load→filter/compare path uses a native
+file dialog + CEF webview (no AX), so it's validated by a human, not automation;
+fixtures live in `tmp/` (`left.csv`/`right.csv` for filter, `cmp-left.csv`/
+`cmp-right.csv` for compare's four statuses).
+
+Two gotchas worth remembering for future work on these structs:
+- Tauri auto-converts only **top-level** command arg names camelCase↔snake_case;
+  **nested struct fields need `#[serde(rename_all = "camelCase")]`** (applied to
+  `FilterOptions` and all `Comparison*` types).
+- `ComparisonStatus` serializes kebab-case (`only-left`/`only-right`) — the
+  frontend's union type and `STATUS_BG`/`STATUS_LABEL` maps key off those exact
+  strings.
+
+The sections below are the original phase-by-phase plan, retained as a record of
+what was built.
+
 ## Context
 
 The app's current core operation — `merge` / `matching_rows` in `sheet-core`,
@@ -57,7 +87,7 @@ column may sit at different positions in left vs right.
 
 ---
 
-## Phase 0 — Remove merge scaffolding
+## Phase 0 — Remove merge scaffolding — ✅ Done
 
 Clears the way so the new operations don't sit beside dead code.
 
@@ -75,7 +105,7 @@ Clears the way so the new operations don't sit beside dead code.
 
 ---
 
-## Phase 1 — Filtering logic (Rust + command + UI)
+## Phase 1 — Filtering logic (Rust + command + UI) — ✅ Done
 
 ### Rust (`sheet-core/src/lib.rs`)
 
@@ -136,7 +166,7 @@ exclude/include flip the kept set; case-insensitive toggles matching; pagination
 
 ---
 
-## Phase 2 — Compare logic (Rust + command + UI)
+## Phase 2 — Compare logic (Rust + command + UI) — ✅ Done
 
 ### Rust (`sheet-core/src/lib.rs`)
 

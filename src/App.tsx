@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  Badge,
   Box,
   Button,
   Checkbox,
@@ -22,6 +23,31 @@ type LoadedCsv = { table: CsvTable; path: string };
 // in the chosen column appears in the right's same-named column; `include` keeps only those.
 type FilterMode = "exclude" | "include";
 type FilterOptions = { mode: FilterMode; caseInsensitive: boolean };
+
+type OperationMode = "filter" | "compare";
+
+// Mirrors `sheet_core::Comparison*`. A VLOOKUP-style diff classifying each key across the
+// two CSVs. Field names are camelCase to match the Rust structs' `serde(rename_all)`.
+type ComparisonStatus = "matched" | "diff" | "only-left" | "only-right";
+type ComparisonRow = {
+  key: string;
+  leftValue: string | null;
+  rightValue: string | null;
+  status: ComparisonStatus;
+};
+type ComparisonSummary = {
+  total: number;
+  matched: number;
+  diff: number;
+  onlyLeft: number;
+  onlyRight: number;
+};
+type ComparisonResult = {
+  rows: ComparisonRow[];
+  keyColumn: string;
+  valueColumn: string;
+  summary: ComparisonSummary;
+};
 
 const ITEMS_PER_PAGE = 10;
 
@@ -198,6 +224,121 @@ function TablePanel({
   );
 }
 
+// Row tint per comparison status, using Mantine's light color variables.
+const STATUS_BG: Record<ComparisonStatus, string | undefined> = {
+  matched: undefined,
+  diff: "var(--mantine-color-red-light)",
+  "only-left": "var(--mantine-color-orange-light)",
+  "only-right": "var(--mantine-color-blue-light)",
+};
+
+const STATUS_LABEL: Record<ComparisonStatus, string> = {
+  matched: "Matched",
+  diff: "Diff",
+  "only-left": "Only Left",
+  "only-right": "Only Right",
+};
+
+type ComparisonTableViewProps = {
+  result: ComparisonResult;
+  page: number;
+  onPageChange: (page: number) => void;
+};
+
+function ComparisonTableView({
+  result,
+  page,
+  onPageChange,
+}: ComparisonTableViewProps) {
+  const { rows, keyColumn, valueColumn, summary } = result;
+  const totalPages = Math.ceil(rows.length / ITEMS_PER_PAGE);
+  const startIndex = (page - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const pageRows = rows.slice(startIndex, endIndex);
+
+  return (
+    <Box
+      style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+    >
+      <Group gap="xs" mb="xs">
+        <Badge color="gray" variant="light">
+          Total {summary.total}
+        </Badge>
+        <Badge color="green" variant="light">
+          Matched {summary.matched}
+        </Badge>
+        <Badge color="red" variant="light">
+          Diff {summary.diff}
+        </Badge>
+        <Badge color="orange" variant="light">
+          Only Left {summary.onlyLeft}
+        </Badge>
+        <Badge color="blue" variant="light">
+          Only Right {summary.onlyRight}
+        </Badge>
+      </Group>
+
+      {/* Same bounded scroll region as CsvTableView (`minHeight: 0` + `overflow: auto`). */}
+      <Box style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        <Table stickyHeader withTableBorder withColumnBorders>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th style={{ whiteSpace: "nowrap" }}>{keyColumn}</Table.Th>
+              <Table.Th style={{ whiteSpace: "nowrap" }}>
+                {valueColumn} (Left)
+              </Table.Th>
+              <Table.Th style={{ whiteSpace: "nowrap" }}>
+                {valueColumn} (Right)
+              </Table.Th>
+              <Table.Th style={{ whiteSpace: "nowrap" }}>Status</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {pageRows.map((row, r) => (
+              <Table.Tr
+                key={startIndex + r}
+                style={{ backgroundColor: STATUS_BG[row.status] }}
+              >
+                <Table.Td style={{ whiteSpace: "nowrap" }}>{row.key}</Table.Td>
+                <Table.Td style={{ whiteSpace: "nowrap" }}>
+                  {row.leftValue ?? ""}
+                </Table.Td>
+                <Table.Td style={{ whiteSpace: "nowrap" }}>
+                  {row.rightValue ?? ""}
+                </Table.Td>
+                <Table.Td style={{ whiteSpace: "nowrap" }}>
+                  {STATUS_LABEL[row.status]}
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Box>
+
+      <Group justify="space-between" mt="xs">
+        <Text size="xs" c="dimmed">
+          {rows.length === 0
+            ? "No rows"
+            : `Showing ${startIndex + 1}-${Math.min(
+                endIndex,
+                rows.length,
+              )} of ${rows.length} rows`}
+        </Text>
+        {totalPages > 1 && (
+          <Pagination
+            value={page}
+            onChange={onPageChange}
+            total={totalPages}
+            size="sm"
+            siblings={1}
+            boundaries={1}
+          />
+        )}
+      </Group>
+    </Box>
+  );
+}
+
 function App() {
   const [leftTable, setLeftTable] = useState<CsvTable | null>(null);
   const [leftPath, setLeftPath] = useState<string | null>(null);
@@ -217,6 +358,14 @@ function App() {
   const [caseInsensitive, setCaseInsensitive] = useState(false);
   const [filtered, setFiltered] = useState<CsvTable | null>(null);
   const [filteredPage, setFilteredPage] = useState(1);
+
+  // Filter vs Compare. The case-insensitive toggle is shared across both modes.
+  const [operationMode, setOperationMode] = useState<OperationMode>("filter");
+  const [commonCols, setCommonCols] = useState<string[]>([]);
+  const [keyColumn, setKeyColumn] = useState<string | null>(null);
+  const [valueColumn, setValueColumn] = useState<string | null>(null);
+  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [comparisonPage, setComparisonPage] = useState(1);
 
   const columnIndex = selectedColumn === null ? null : Number(selectedColumn);
   const columnValid =
@@ -260,6 +409,88 @@ function App() {
     };
   }, [leftTable, rightTable, columnIndex, columnValid, filterMode, caseInsensitive]);
 
+  // The candidate compare columns (header names in both tables) come from Rust. Recompute
+  // when either table changes and clear any stale key/value selection.
+  useEffect(() => {
+    if (!leftTable || !rightTable) {
+      setCommonCols([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<string[]>("common_columns", { left: leftTable, right: rightTable })
+      .then((cols) => {
+        if (cancelled) return;
+        setCommonCols(cols);
+        setKeyColumn(null);
+        setValueColumn(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load common columns:", err);
+        setCommonCols([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [leftTable, rightTable]);
+
+  const keyIndex = keyColumn === null ? null : Number(keyColumn);
+  const valueIndex = valueColumn === null ? null : Number(valueColumn);
+  const compareValid =
+    keyIndex !== null &&
+    valueIndex !== null &&
+    keyIndex < commonCols.length &&
+    valueIndex < commonCols.length;
+
+  // The compare runs in Rust via `compare_csv`. Recompute when the inputs change while in
+  // compare mode; a cancellation flag drops a stale response.
+  useEffect(() => {
+    if (
+      operationMode !== "compare" ||
+      !leftTable ||
+      !rightTable ||
+      !compareValid
+    ) {
+      setComparison(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<ComparisonResult>("compare_csv", {
+      left: leftTable,
+      right: rightTable,
+      keyColumn: commonCols[keyIndex],
+      valueColumn: commonCols[valueIndex],
+      caseInsensitive,
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setComparison(result);
+        setComparisonPage(1);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to compare:", err);
+        notifications.show({
+          color: "red",
+          title: "Compare failed",
+          message: String(err),
+        });
+        setComparison(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    operationMode,
+    leftTable,
+    rightTable,
+    keyIndex,
+    valueIndex,
+    compareValid,
+    caseInsensitive,
+    commonCols,
+  ]);
+
   async function loadCsv(
     setTable: (table: CsvTable) => void,
     setPath: (path: string) => void,
@@ -294,9 +525,12 @@ function App() {
     setRightPath(leftPath);
     setLeftPage(1);
     setRightPage(1);
-    // The column is chosen from the right table, which just changed — clear the selection.
+    // Selections reference the now-swapped tables — clear them.
     setSelectedColumn(null);
     setFilteredPage(1);
+    setKeyColumn(null);
+    setValueColumn(null);
+    setComparisonPage(1);
   }
 
   async function exportResult() {
@@ -317,12 +551,38 @@ function App() {
     }
   }
 
+  // Compare results export through the Rust `comparison_to_table` renderer, then `save_csv`.
+  async function exportComparison() {
+    if (!comparison || comparison.rows.length === 0) return;
+    setExporting(true);
+    try {
+      const table = await invoke<CsvTable>("comparison_to_table", {
+        result: comparison,
+      });
+      await invoke<boolean>("save_csv", { table });
+    } catch (err) {
+      console.error("Failed to export comparison:", err);
+      notifications.show({
+        color: "red",
+        title: "Export failed",
+        message: String(err),
+      });
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const canExport = !!filtered && filtered.rows.length > 0;
+  const canExportComparison = !!comparison && comparison.rows.length > 0;
   const columnOptions =
     rightTable?.headers.map((_, index) => ({
       value: String(index),
       label: displayHeaders(rightTable.headers)[index],
     })) ?? [];
+  const commonColOptions = commonCols.map((name, index) => ({
+    value: String(index),
+    label: name.trim() ? name : "(empty header)",
+  }));
 
   return (
     // Plain flex column we fully control: a 100vh box whose two row regions (the source
@@ -340,7 +600,7 @@ function App() {
     >
       <Group justify="center" pos="relative">
         <Title order={1} ta="center">
-          Spreadsheet Filter
+          CSV Filter &amp; Compare
         </Title>
         <Button
           variant="default"
@@ -395,54 +655,132 @@ function App() {
           flexDirection: "column",
         }}
       >
-        <Group justify="space-between" mb="sm" wrap="nowrap" align="flex-end">
-          <Group gap="md" align="flex-end" wrap="wrap">
-            <Title order={2} size="h4">
-              Filter
-            </Title>
-            <Select
-              label="Column (from Right)"
-              placeholder="Select a column"
-              data={columnOptions}
-              value={selectedColumn}
-              onChange={setSelectedColumn}
-              disabled={!rightTable}
-              size="sm"
-              w={220}
-              comboboxProps={{ withinPortal: true }}
-            />
-            <SegmentedControl
-              value={filterMode}
-              onChange={(value) => setFilterMode(value as FilterMode)}
-              data={[
-                { value: "exclude", label: "Exclude" },
-                { value: "include", label: "Include" },
-              ]}
-              size="sm"
-            />
-            <Checkbox
-              label="Case insensitive"
-              checked={caseInsensitive}
-              onChange={(event) => setCaseInsensitive(event.currentTarget.checked)}
-            />
-          </Group>
-          <Button onClick={exportResult} loading={exporting} disabled={!canExport}>
-            Export result
-          </Button>
-        </Group>
+        <SegmentedControl
+          value={operationMode}
+          onChange={(value) => setOperationMode(value as OperationMode)}
+          data={[
+            { value: "filter", label: "Filter" },
+            { value: "compare", label: "Compare" },
+          ]}
+          size="sm"
+          mb="sm"
+          style={{ alignSelf: "flex-start" }}
+        />
 
-        {filtered ? (
-          <CsvTableView
-            table={filtered}
-            page={filteredPage}
-            onPageChange={setFilteredPage}
-          />
+        {operationMode === "filter" ? (
+          <>
+            <Group justify="space-between" mb="sm" wrap="nowrap" align="flex-end">
+              <Group gap="md" align="flex-end" wrap="wrap">
+                <Select
+                  label="Column (from Right)"
+                  placeholder="Select a column"
+                  data={columnOptions}
+                  value={selectedColumn}
+                  onChange={setSelectedColumn}
+                  disabled={!rightTable}
+                  size="sm"
+                  w={220}
+                  comboboxProps={{ withinPortal: true }}
+                />
+                <SegmentedControl
+                  value={filterMode}
+                  onChange={(value) => setFilterMode(value as FilterMode)}
+                  data={[
+                    { value: "exclude", label: "Exclude" },
+                    { value: "include", label: "Include" },
+                  ]}
+                  size="sm"
+                />
+                <Checkbox
+                  label="Case insensitive"
+                  checked={caseInsensitive}
+                  onChange={(event) =>
+                    setCaseInsensitive(event.currentTarget.checked)
+                  }
+                />
+              </Group>
+              <Button
+                onClick={exportResult}
+                loading={exporting}
+                disabled={!canExport}
+              >
+                Export result
+              </Button>
+            </Group>
+
+            {filtered ? (
+              <CsvTableView
+                table={filtered}
+                page={filteredPage}
+                onPageChange={setFilteredPage}
+              />
+            ) : (
+              <Text c="dimmed" fs="italic">
+                {leftTable && rightTable
+                  ? "Pick a column from the Right CSV to filter the Left CSV."
+                  : "Load both CSVs to filter."}
+              </Text>
+            )}
+          </>
         ) : (
-          <Text c="dimmed" fs="italic">
-            {leftTable && rightTable
-              ? "Pick a column from the Right CSV to filter the Left CSV."
-              : "Load both CSVs to filter."}
-          </Text>
+          <>
+            <Group justify="space-between" mb="sm" wrap="nowrap" align="flex-end">
+              <Group gap="md" align="flex-end" wrap="wrap">
+                <Select
+                  label="Key column"
+                  placeholder="Select a column"
+                  data={commonColOptions}
+                  value={keyColumn}
+                  onChange={setKeyColumn}
+                  disabled={commonCols.length === 0}
+                  size="sm"
+                  w={200}
+                  comboboxProps={{ withinPortal: true }}
+                />
+                <Select
+                  label="Value column"
+                  placeholder="Select a column"
+                  data={commonColOptions}
+                  value={valueColumn}
+                  onChange={setValueColumn}
+                  disabled={commonCols.length === 0}
+                  size="sm"
+                  w={200}
+                  comboboxProps={{ withinPortal: true }}
+                />
+                <Checkbox
+                  label="Case insensitive"
+                  checked={caseInsensitive}
+                  onChange={(event) =>
+                    setCaseInsensitive(event.currentTarget.checked)
+                  }
+                />
+              </Group>
+              <Button
+                onClick={exportComparison}
+                loading={exporting}
+                disabled={!canExportComparison}
+              >
+                Export result
+              </Button>
+            </Group>
+
+            {comparison ? (
+              <ComparisonTableView
+                result={comparison}
+                page={comparisonPage}
+                onPageChange={setComparisonPage}
+              />
+            ) : (
+              <Text c="dimmed" fs="italic">
+                {!leftTable || !rightTable
+                  ? "Load both CSVs to compare."
+                  : commonCols.length === 0
+                    ? "The two CSVs share no columns to compare."
+                    : "Pick key and value columns to compare."}
+              </Text>
+            )}
+          </>
         )}
       </Paper>
     </Box>
