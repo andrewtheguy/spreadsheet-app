@@ -1,5 +1,6 @@
-// A CSV file parsed into a header row plus data rows, sent to the frontend for display.
-#[derive(serde::Serialize)]
+// A CSV file parsed into a header row plus data rows. Sent to the frontend for display
+// (`load_csv`) and received back from it for export (`save_csv`).
+#[derive(serde::Serialize, serde::Deserialize)]
 struct CsvTable {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -58,6 +59,42 @@ async fn load_csv<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<
     Ok(Some(CsvTable { headers, rows }))
 }
 
+// Opens a native save dialog for a `.csv` file and writes `table` to it. Returns `Ok(false)`
+// when the user cancels the dialog so the frontend can no-op.
+#[tauri::command]
+async fn save_csv<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    table: CsvTable,
+) -> Result<bool, String> {
+    // Same main-thread dialog dance as `load_csv`: the native dialog must run on the UI
+    // thread on macOS, so schedule it and hand the chosen path back over a channel.
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let path = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv"])
+            .set_file_name("merged.csv")
+            .save_file();
+        let _ = tx.send(path);
+    })
+    .map_err(|e| e.to_string())?;
+
+    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+
+    let mut writer = csv::Writer::from_path(&path)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    writer
+        .write_record(&table.headers)
+        .map_err(|e| e.to_string())?;
+    for row in &table.rows {
+        writer.write_record(row).map_err(|e| e.to_string())?;
+    }
+    writer.flush().map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
 // links inside the embedded Chromium webview, so the frontend routes external links
 // here instead.
@@ -96,7 +133,7 @@ pub fn run() {
             ("--use-mock-keychain", None::<&str>),
             ("password-store", Some("basic")),
         ])
-        .invoke_handler(tauri::generate_handler![open_external, load_csv])
+        .invoke_handler(tauri::generate_handler![open_external, load_csv, save_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
