@@ -377,7 +377,7 @@ function App() {
   // it whenever the inputs change; a cancellation flag drops a stale response if the inputs
   // change again before it resolves.
   useEffect(() => {
-    if (!leftTable || !rightTable || !columnValid) {
+    if (operationMode !== "filter" || !leftTable || !rightTable || !columnValid) {
       setFiltered(null);
       return;
     }
@@ -407,7 +407,15 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [leftTable, rightTable, columnIndex, columnValid, filterMode, caseInsensitive]);
+  }, [
+    operationMode,
+    leftTable,
+    rightTable,
+    columnIndex,
+    columnValid,
+    filterMode,
+    caseInsensitive,
+  ]);
 
   // The candidate compare columns (header names in both tables) come from Rust. Recompute
   // when either table changes and clear any stale key/value selection.
@@ -439,6 +447,7 @@ function App() {
   const compareValid =
     keyIndex !== null &&
     valueIndex !== null &&
+    keyIndex !== valueIndex &&
     keyIndex < commonCols.length &&
     valueIndex < commonCols.length;
 
@@ -777,7 +786,9 @@ function App() {
                   ? "Load both CSVs to compare."
                   : commonCols.length === 0
                     ? "The two CSVs share no columns to compare."
-                    : "Pick key and value columns to compare."}
+                    : keyIndex !== null && keyIndex === valueIndex
+                      ? "Key and value columns must differ."
+                      : "Pick key and value columns to compare."}
               </Text>
             )}
           </>

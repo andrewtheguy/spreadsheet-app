@@ -311,11 +311,12 @@ pub fn comparison_to_table(result: &ComparisonResult) -> CsvTable {
         .rows
         .iter()
         .map(|row| {
+            // Labels mirror the frontend's STATUS_LABEL so the exported CSV matches the UI.
             let status = match row.status {
-                ComparisonStatus::Matched => "matched",
-                ComparisonStatus::Diff => "diff",
-                ComparisonStatus::OnlyLeft => "only left",
-                ComparisonStatus::OnlyRight => "only right",
+                ComparisonStatus::Matched => "Matched",
+                ComparisonStatus::Diff => "Diff",
+                ComparisonStatus::OnlyLeft => "Only Left",
+                ComparisonStatus::OnlyRight => "Only Right",
             };
             vec![
                 row.key.clone(),
@@ -577,9 +578,9 @@ mod tests {
         assert_eq!(
             exported.rows,
             rows(&[
-                &["A", "10", "10", "matched"],
-                &["B", "20", "", "only left"],
-                &["C", "", "30", "only right"],
+                &["A", "10", "10", "Matched"],
+                &["B", "20", "", "Only Left"],
+                &["C", "", "30", "Only Right"],
             ])
         );
     }
