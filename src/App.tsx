@@ -1,6 +1,15 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import {
+  Alert,
+  Button,
+  Group,
+  Paper,
+  Stack,
+  Table,
+  Text,
+  Title,
+} from "@mantine/core";
 
 type CsvTable = { headers: string[]; rows: string[][] };
 
@@ -14,41 +23,57 @@ type TablePanelProps = {
 
 function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
   return (
-    <section className="panel">
-      <div className="panel-header">
-        <h2>{title}</h2>
-        <button onClick={onLoad} disabled={loading}>
-          {loading ? "Loading…" : "Load CSV"}
-        </button>
-      </div>
+    <Paper
+      withBorder
+      p="sm"
+      style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}
+    >
+      <Group justify="space-between" mb="sm">
+        <Title order={2} size="h4">
+          {title}
+        </Title>
+        <Button onClick={onLoad} loading={loading}>
+          Load CSV
+        </Button>
+      </Group>
 
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <Alert color="red" mb="sm">
+          {error}
+        </Alert>
+      )}
 
       {table ? (
-        <div className="table-wrapper">
-          <table className="csv-table">
-            <thead>
-              <tr>
+        <Table.ScrollContainer minWidth={0} style={{ flex: 1, minHeight: 0 }}>
+          <Table stickyHeader striped withTableBorder withColumnBorders>
+            <Table.Thead>
+              <Table.Tr>
                 {table.headers.map((header, i) => (
-                  <th key={i}>{header}</th>
+                  <Table.Th key={i} style={{ whiteSpace: "nowrap" }}>
+                    {header}
+                  </Table.Th>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
               {table.rows.map((row, r) => (
-                <tr key={r}>
+                <Table.Tr key={r}>
                   {row.map((cell, c) => (
-                    <td key={c}>{cell}</td>
+                    <Table.Td key={c} style={{ whiteSpace: "nowrap" }}>
+                      {cell}
+                    </Table.Td>
                   ))}
-                </tr>
+                </Table.Tr>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       ) : (
-        <p className="placeholder">No spreadsheet loaded.</p>
+        <Text c="dimmed" fs="italic">
+          No spreadsheet loaded.
+        </Text>
       )}
-    </section>
+    </Paper>
   );
 }
 
@@ -81,10 +106,12 @@ function App() {
   }
 
   return (
-    <main className="container">
-      <h1>Spreadsheet Merge</h1>
+    <Stack h="100vh" p="md" gap="md">
+      <Title order={1} ta="center">
+        Spreadsheet Merge
+      </Title>
 
-      <div className="panels">
+      <Group grow align="stretch" style={{ flex: 1, minHeight: 0 }}>
         <TablePanel
           title="Left"
           table={leftTable}
@@ -99,12 +126,18 @@ function App() {
           error={rightError}
           onLoad={() => loadCsv(setRightTable, setRightLoading, setRightError)}
         />
-      </div>
+      </Group>
 
-      <section className="merged-panel">
-        <p className="placeholder">placeholder for now</p>
-      </section>
-    </main>
+      <Paper
+        withBorder
+        p="sm"
+        style={{ borderStyle: "dashed", minHeight: 120 }}
+      >
+        <Text c="dimmed" fs="italic">
+          placeholder for now
+        </Text>
+      </Paper>
+    </Stack>
   );
 }
 
