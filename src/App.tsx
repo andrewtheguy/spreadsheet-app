@@ -1,46 +1,132 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Alert,
   Box,
   Button,
   Group,
+  Pagination,
   Paper,
   Table,
   Text,
   Title,
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 
 type CsvTable = { headers: string[]; rows: string[][] };
+type LoadedCsv = { table: CsvTable; path: string };
 
-function CsvTableView({ table }: { table: CsvTable }) {
+const ITEMS_PER_PAGE = 10;
+
+// A row is treated as blank when every cell is empty or whitespace-only. Blank rows are
+// hidden in the rendered tables (display-only) — the underlying data keeps them.
+function isBlankRow(row: string[]): boolean {
+  return row.every((cell) => cell.trim() === "");
+}
+
+// Empty/whitespace-only headers are shown as "(Empty column N)" using their 1-based column
+// position, so blank columns stay identifiable in the table head.
+function displayHeaders(headers: string[]): string[] {
+  return headers.map((header, index) =>
+    header.trim() ? header : `(Empty column ${index + 1})`,
+  );
+}
+
+// Middle-truncates a long file path to `maxLength`, keeping the filename intact. Handles
+// both POSIX (`/`) and Windows (`\`) separators.
+function truncatePath(path: string, maxLength = 50): string {
+  if (path.length <= maxLength) return path;
+
+  const sepIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const fileName = sepIndex >= 0 ? path.slice(sepIndex + 1) : path;
+  const dir = sepIndex >= 0 ? path.slice(0, sepIndex) : "";
+
+  // When the filename alone won't fit, there's no room for any directory context — truncate
+  // the filename itself to keep the result within `maxLength` (and avoid a negative
+  // `startLength` below).
+  if (fileName.length >= maxLength - 4) {
+    return `...${fileName.slice(-(maxLength - 3))}`;
+  }
+
+  if (dir.length === 0) return `.../${fileName}`;
+  if (dir.length <= maxLength - fileName.length - 1) return path;
+
+  const startLength = Math.floor((maxLength - fileName.length - 4) / 2);
+  const start = dir.slice(0, startLength);
+  const end = dir.slice(dir.length - startLength);
+  return `${start}...${end}/${fileName}`;
+}
+
+type CsvTableViewProps = {
+  table: CsvTable;
+  page: number;
+  onPageChange: (page: number) => void;
+};
+
+function CsvTableView({ table, page, onPageChange }: CsvTableViewProps) {
+  const headers = displayHeaders(table.headers);
+  // Display-only: hide fully-blank rows; pagination counts only the visible ones.
+  const visibleRows = table.rows.filter((row) => !isBlankRow(row));
+  const totalPages = Math.ceil(visibleRows.length / ITEMS_PER_PAGE);
+  const startIndex = (page - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const pageRows = visibleRows.slice(startIndex, endIndex);
+
   return (
-    // A bounded, scrollable region inside the panel's flex column: `minHeight: 0` lets it
-    // shrink below content size so `overflow: auto` scrolls instead of overflowing the
-    // panel. `stickyHeader` pins the header row against this scroll container.
-    <Box style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-      <Table stickyHeader striped withTableBorder withColumnBorders>
-        <Table.Thead>
-          <Table.Tr>
-            {table.headers.map((header, i) => (
-              <Table.Th key={i} style={{ whiteSpace: "nowrap" }}>
-                {header}
-              </Table.Th>
-            ))}
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          {table.rows.map((row, r) => (
-            <Table.Tr key={r}>
-              {row.map((cell, c) => (
-                <Table.Td key={c} style={{ whiteSpace: "nowrap" }}>
-                  {cell}
-                </Table.Td>
+    <Box
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {/* A bounded, scrollable region: `minHeight: 0` lets it shrink below content size so
+          `overflow: auto` scrolls instead of overflowing. `stickyHeader` pins the header. */}
+      <Box style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        <Table stickyHeader striped withTableBorder withColumnBorders>
+          <Table.Thead>
+            <Table.Tr>
+              {headers.map((header, i) => (
+                <Table.Th key={i} style={{ whiteSpace: "nowrap" }}>
+                  {header}
+                </Table.Th>
               ))}
             </Table.Tr>
-          ))}
-        </Table.Tbody>
-      </Table>
+          </Table.Thead>
+          <Table.Tbody>
+            {pageRows.map((row, r) => (
+              <Table.Tr key={startIndex + r}>
+                {row.map((cell, c) => (
+                  <Table.Td key={c} style={{ whiteSpace: "nowrap" }}>
+                    {cell}
+                  </Table.Td>
+                ))}
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Box>
+
+      <Group justify="space-between" mt="xs">
+        <Text size="xs" c="dimmed">
+          {visibleRows.length === 0
+            ? "No rows"
+            : `Showing ${startIndex + 1}-${Math.min(
+                endIndex,
+                visibleRows.length,
+              )} of ${visibleRows.length} rows`}
+        </Text>
+        {totalPages > 1 && (
+          <Pagination
+            value={page}
+            onChange={onPageChange}
+            total={totalPages}
+            size="sm"
+            siblings={1}
+            boundaries={1}
+          />
+        )}
+      </Group>
     </Box>
   );
 }
@@ -48,12 +134,22 @@ function CsvTableView({ table }: { table: CsvTable }) {
 type TablePanelProps = {
   title: string;
   table: CsvTable | null;
+  path: string | null;
   loading: boolean;
-  error: string;
+  page: number;
+  onPageChange: (page: number) => void;
   onLoad: () => void;
 };
 
-function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
+function TablePanel({
+  title,
+  table,
+  path,
+  loading,
+  page,
+  onPageChange,
+  onLoad,
+}: TablePanelProps) {
   return (
     <Paper
       withBorder
@@ -67,23 +163,24 @@ function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
         flexDirection: "column",
       }}
     >
-      <Group justify="space-between" mb="sm">
-        <Title order={2} size="h4">
-          {title}
-        </Title>
+      <Group justify="space-between" mb="sm" wrap="nowrap">
+        <Box style={{ minWidth: 0 }}>
+          <Title order={2} size="h4">
+            {title}
+          </Title>
+          {path && (
+            <Text size="xs" c="dimmed" title={path}>
+              {truncatePath(path)}
+            </Text>
+          )}
+        </Box>
         <Button onClick={onLoad} loading={loading}>
           Load CSV
         </Button>
       </Group>
 
-      {error && (
-        <Alert color="red" mb="sm">
-          {error}
-        </Alert>
-      )}
-
       {table ? (
-        <CsvTableView table={table} />
+        <CsvTableView table={table} page={page} onPageChange={onPageChange} />
       ) : (
         <Text c="dimmed" fs="italic">
           No spreadsheet loaded.
@@ -95,16 +192,18 @@ function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
 
 function App() {
   const [leftTable, setLeftTable] = useState<CsvTable | null>(null);
+  const [leftPath, setLeftPath] = useState<string | null>(null);
   const [leftLoading, setLeftLoading] = useState(false);
-  const [leftError, setLeftError] = useState("");
+  const [leftPage, setLeftPage] = useState(1);
 
   const [rightTable, setRightTable] = useState<CsvTable | null>(null);
+  const [rightPath, setRightPath] = useState<string | null>(null);
   const [rightLoading, setRightLoading] = useState(false);
-  const [rightError, setRightError] = useState("");
+  const [rightPage, setRightPage] = useState(1);
 
   const [exporting, setExporting] = useState(false);
-  const [mergedError, setMergedError] = useState("");
   const [merged, setMerged] = useState<CsvTable | null>(null);
+  const [mergedPage, setMergedPage] = useState(1);
 
   // The merge runs in the Rust `sheet-core` crate via the `merge_csv` command. Recompute
   // it whenever either source table changes; a cancellation flag drops a stale response if
@@ -112,19 +211,23 @@ function App() {
   useEffect(() => {
     if (!leftTable || !rightTable) {
       setMerged(null);
-      setMergedError("");
       return;
     }
     let cancelled = false;
-    setMergedError("");
     invoke<CsvTable>("merge_csv", { left: leftTable, right: rightTable })
       .then((result) => {
-        if (!cancelled) setMerged(result);
+        if (cancelled) return;
+        setMerged(result);
+        setMergedPage(1);
       })
       .catch((err) => {
         if (cancelled) return;
         console.error("Failed to merge:", err);
-        setMergedError(String(err));
+        notifications.show({
+          color: "red",
+          title: "Merge failed",
+          message: String(err),
+        });
         setMerged(null);
       });
     return () => {
@@ -134,33 +237,53 @@ function App() {
 
   async function loadCsv(
     setTable: (table: CsvTable) => void,
+    setPath: (path: string) => void,
     setLoading: (loading: boolean) => void,
-    setError: (error: string) => void,
+    setPage: (page: number) => void,
   ) {
     setLoading(true);
-    setError("");
     try {
       // `load_csv` returns null when the user cancels the dialog; keep the current table.
-      const result = await invoke<CsvTable | null>("load_csv");
-      if (result) setTable(result);
+      const result = await invoke<LoadedCsv | null>("load_csv");
+      if (result) {
+        setTable(result.table);
+        setPath(result.path);
+        setPage(1);
+      }
     } catch (err) {
       console.error("Failed to load CSV:", err);
-      setError(String(err));
+      notifications.show({
+        color: "red",
+        title: "Failed to load CSV",
+        message: String(err),
+      });
     } finally {
       setLoading(false);
     }
   }
 
+  function swapSides() {
+    setLeftTable(rightTable);
+    setRightTable(leftTable);
+    setLeftPath(rightPath);
+    setRightPath(leftPath);
+    setLeftPage(1);
+    setRightPage(1);
+  }
+
   async function exportResult() {
     if (!merged || merged.rows.length === 0) return;
     setExporting(true);
-    setMergedError("");
     try {
       // `save_csv` returns false when the user cancels the save dialog; nothing to do.
       await invoke<boolean>("save_csv", { table: merged });
     } catch (err) {
       console.error("Failed to export result:", err);
-      setMergedError(String(err));
+      notifications.show({
+        color: "red",
+        title: "Export failed",
+        message: String(err),
+      });
     } finally {
       setExporting(false);
     }
@@ -182,9 +305,19 @@ function App() {
         gap: "var(--mantine-spacing-md)",
       }}
     >
-      <Title order={1} ta="center">
-        Spreadsheet Merge
-      </Title>
+      <Group justify="center" pos="relative">
+        <Title order={1} ta="center">
+          Spreadsheet Merge
+        </Title>
+        <Button
+          variant="default"
+          onClick={swapSides}
+          disabled={!leftTable && !rightTable}
+          style={{ position: "absolute", right: 0 }}
+        >
+          Swap Left &amp; Right
+        </Button>
+      </Group>
 
       <Box
         style={{
@@ -197,16 +330,24 @@ function App() {
         <TablePanel
           title="Left"
           table={leftTable}
+          path={leftPath}
           loading={leftLoading}
-          error={leftError}
-          onLoad={() => loadCsv(setLeftTable, setLeftLoading, setLeftError)}
+          page={leftPage}
+          onPageChange={setLeftPage}
+          onLoad={() =>
+            loadCsv(setLeftTable, setLeftPath, setLeftLoading, setLeftPage)
+          }
         />
         <TablePanel
           title="Right"
           table={rightTable}
+          path={rightPath}
           loading={rightLoading}
-          error={rightError}
-          onLoad={() => loadCsv(setRightTable, setRightLoading, setRightError)}
+          page={rightPage}
+          onPageChange={setRightPage}
+          onLoad={() =>
+            loadCsv(setRightTable, setRightPath, setRightLoading, setRightPage)
+          }
         />
       </Box>
 
@@ -241,14 +382,12 @@ function App() {
           </Button>
         </Group>
 
-        {mergedError && (
-          <Alert color="red" mb="sm">
-            {mergedError}
-          </Alert>
-        )}
-
         {merged && mergedCount > 0 ? (
-          <CsvTableView table={merged} />
+          <CsvTableView
+            table={merged}
+            page={mergedPage}
+            onPageChange={setMergedPage}
+          />
         ) : (
           <Text c="dimmed" fs="italic">
             {leftTable && rightTable
