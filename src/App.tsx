@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Badge,
@@ -27,6 +27,23 @@ type FilterMode = "exclude" | "include";
 type FilterOptions = { mode: FilterMode; caseInsensitive: boolean };
 
 type OperationMode = "filter" | "compare";
+
+// Which column a table view is sorted by, and in which direction. `null` means unsorted.
+type SortState = { index: number; ascending: boolean };
+
+// The next state when a header is clicked, cycling ascending → descending → unsorted. A
+// click on a different column starts that column ascending; `null` means "back to unsorted".
+function nextSort(prev: SortState | null, index: number): SortState | null {
+  if (!prev || prev.index !== index) return { index, ascending: true };
+  if (prev.ascending) return { index, ascending: false };
+  return null;
+}
+
+// Renders the ▲/▼ indicator for the sort column (empty for unsorted columns).
+function sortIndicator(sort: SortState | null | undefined, index: number): string {
+  if (!sort || sort.index !== index) return "";
+  return sort.ascending ? " ▲" : " ▼";
+}
 
 // Mirrors `sheet_core::Comparison*`. A VLOOKUP-style diff classifying each key across the
 // two CSVs. Field names are camelCase to match the Rust structs' `serde(rename_all)`.
@@ -96,9 +113,19 @@ type CsvTableViewProps = {
   table: CsvTable;
   page: number;
   onPageChange: (page: number) => void;
+  // Current sort and a click handler keyed by column index. The parent owns sorting (it
+  // runs in Rust); this view only renders the already-sorted `table` and emits clicks.
+  sort?: SortState | null;
+  onSort?: (columnIndex: number) => void;
 };
 
-function CsvTableView({ table, page, onPageChange }: CsvTableViewProps) {
+function CsvTableView({
+  table,
+  page,
+  onPageChange,
+  sort,
+  onSort,
+}: CsvTableViewProps) {
   const headers = displayHeaders(table.headers);
   // Display-only: hide fully-blank rows; pagination counts only the visible ones.
   const visibleRows = table.rows.filter((row) => !isBlankRow(row));
@@ -123,8 +150,17 @@ function CsvTableView({ table, page, onPageChange }: CsvTableViewProps) {
           <Table.Thead>
             <Table.Tr>
               {headers.map((header, i) => (
-                <Table.Th key={i} style={{ whiteSpace: "nowrap" }}>
+                <Table.Th
+                  key={i}
+                  onClick={onSort ? () => onSort(i) : undefined}
+                  style={{
+                    whiteSpace: "nowrap",
+                    cursor: onSort ? "pointer" : undefined,
+                    userSelect: "none",
+                  }}
+                >
                   {header}
+                  {sortIndicator(sort, i)}
                 </Table.Th>
               ))}
             </Table.Tr>
@@ -175,6 +211,8 @@ type TablePanelProps = {
   page: number;
   onPageChange: (page: number) => void;
   onLoad: () => void;
+  sort: SortState | null;
+  onSort: (columnIndex: number) => void;
 };
 
 function TablePanel({
@@ -185,6 +223,8 @@ function TablePanel({
   page,
   onPageChange,
   onLoad,
+  sort,
+  onSort,
 }: TablePanelProps) {
   return (
     <Paper
@@ -216,7 +256,13 @@ function TablePanel({
       </Group>
 
       {table ? (
-        <CsvTableView table={table} page={page} onPageChange={onPageChange} />
+        <CsvTableView
+          table={table}
+          page={page}
+          onPageChange={onPageChange}
+          sort={sort}
+          onSort={onSort}
+        />
       ) : (
         <Text c="dimmed" fs="italic">
           No spreadsheet loaded.
@@ -245,14 +291,26 @@ type ComparisonTableViewProps = {
   result: ComparisonResult;
   page: number;
   onPageChange: (page: number) => void;
+  // Sort runs in Rust; this view renders the already-sorted `result` and emits header
+  // clicks. Column indices: 0=key, 1=left value, 2=right value, 3=status.
+  sort?: SortState | null;
+  onSort?: (columnIndex: number) => void;
 };
 
 function ComparisonTableView({
   result,
   page,
   onPageChange,
+  sort,
+  onSort,
 }: ComparisonTableViewProps) {
   const { rows, keyColumn, valueColumn, summary } = result;
+  const columnLabels = [
+    keyColumn,
+    `${valueColumn} (Left)`,
+    `${valueColumn} (Right)`,
+    "Status",
+  ];
   const totalPages = Math.ceil(rows.length / ITEMS_PER_PAGE);
   const startIndex = (page - 1) * ITEMS_PER_PAGE;
   const endIndex = startIndex + ITEMS_PER_PAGE;
@@ -285,14 +343,20 @@ function ComparisonTableView({
         <Table stickyHeader withTableBorder withColumnBorders>
           <Table.Thead>
             <Table.Tr>
-              <Table.Th style={{ whiteSpace: "nowrap" }}>{keyColumn}</Table.Th>
-              <Table.Th style={{ whiteSpace: "nowrap" }}>
-                {valueColumn} (Left)
-              </Table.Th>
-              <Table.Th style={{ whiteSpace: "nowrap" }}>
-                {valueColumn} (Right)
-              </Table.Th>
-              <Table.Th style={{ whiteSpace: "nowrap" }}>Status</Table.Th>
+              {columnLabels.map((label, i) => (
+                <Table.Th
+                  key={i}
+                  onClick={onSort ? () => onSort(i) : undefined}
+                  style={{
+                    whiteSpace: "nowrap",
+                    cursor: onSort ? "pointer" : undefined,
+                    userSelect: "none",
+                  }}
+                >
+                  {label}
+                  {sortIndicator(sort, i)}
+                </Table.Th>
+              ))}
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
@@ -347,12 +411,19 @@ function App() {
   const [leftPath, setLeftPath] = useState<string | null>(null);
   const [leftLoading, setLeftLoading] = useState(false);
   const [leftPage, setLeftPage] = useState(1);
+  // Display-only sorted view of the left table (null = show it unsorted) plus its sort
+  // state. Kept separate from `leftTable` so sorting for display never re-triggers the
+  // filter/compare effects or the backend operations (which still use the original order).
+  const [leftView, setLeftView] = useState<CsvTable | null>(null);
+  const [leftSort, setLeftSort] = useState<SortState | null>(null);
 
   const [rightTable, setRightTable] = useState<CsvTable | null>(null);
   const [rightId, setRightId] = useState<number | null>(null);
   const [rightPath, setRightPath] = useState<string | null>(null);
   const [rightLoading, setRightLoading] = useState(false);
   const [rightPage, setRightPage] = useState(1);
+  const [rightView, setRightView] = useState<CsvTable | null>(null);
+  const [rightSort, setRightSort] = useState<SortState | null>(null);
 
   const [exporting, setExporting] = useState(false);
   // The column to filter by, stored as its index (as a string) into the right table's
@@ -362,6 +433,11 @@ function App() {
   const [caseInsensitive, setCaseInsensitive] = useState(false);
   const [filtered, setFiltered] = useState<CsvTable | null>(null);
   const [filteredPage, setFilteredPage] = useState(1);
+  // `filtered`/`comparison` stay in their original (computed) order; the sorted display lives
+  // in a separate view (null = unsorted) so a third header click can drop back to it.
+  // Recomputing the result clears both the view and its sort descriptor.
+  const [filteredView, setFilteredView] = useState<CsvTable | null>(null);
+  const [filteredSort, setFilteredSort] = useState<SortState | null>(null);
 
   // Filter vs Compare. The case-insensitive toggle is shared across both modes.
   const [operationMode, setOperationMode] = useState<OperationMode>("filter");
@@ -370,6 +446,10 @@ function App() {
   const [valueColumn, setValueColumn] = useState<string | null>(null);
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
   const [comparisonPage, setComparisonPage] = useState(1);
+  const [comparisonView, setComparisonView] = useState<ComparisonResult | null>(
+    null,
+  );
+  const [comparisonSort, setComparisonSort] = useState<SortState | null>(null);
 
   const columnIndex = selectedColumn === null ? null : Number(selectedColumn);
   const columnValid =
@@ -404,6 +484,8 @@ function App() {
         if (cancelled) return;
         setFiltered(result);
         setFilteredPage(1);
+        setFilteredView(null);
+        setFilteredSort(null);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -489,6 +571,8 @@ function App() {
         if (cancelled) return;
         setComparison(result);
         setComparisonPage(1);
+        setComparisonView(null);
+        setComparisonSort(null);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -523,6 +607,8 @@ function App() {
     const setPath = isLeft ? setLeftPath : setRightPath;
     const setLoading = isLeft ? setLeftLoading : setRightLoading;
     const setPage = isLeft ? setLeftPage : setRightPage;
+    const setView = isLeft ? setLeftView : setRightView;
+    const setSort = isLeft ? setLeftSort : setRightSort;
     // The side's current table is superseded by this load; pass its id so the backend
     // store evicts it (null on first load → `None`, nothing to evict).
     const replace = isLeft ? leftId : rightId;
@@ -536,6 +622,9 @@ function App() {
         setId(result.id);
         setPath(result.path);
         setPage(1);
+        // The new file replaces any sorted view of the previous one.
+        setView(null);
+        setSort(null);
       }
     } catch (err) {
       console.error("Failed to load CSV:", err);
@@ -556,6 +645,11 @@ function App() {
     // points at which — no reload needed.
     setLeftId(rightId);
     setRightId(leftId);
+    // The sorted views and their sort state follow their tables to the other side.
+    setLeftView(rightView);
+    setRightView(leftView);
+    setLeftSort(rightSort);
+    setRightSort(leftSort);
     setLeftPath(rightPath);
     setRightPath(leftPath);
     setLeftPage(1);
@@ -568,12 +662,114 @@ function App() {
     setComparisonPage(1);
   }
 
+  // Guards against out-of-order sort responses: every handler bumps its target's token at
+  // the start, and a resolved (or cleared) response is only applied if its token is still
+  // current — so a stale `sort_*` reply can't clobber a newer sort or clear.
+  const leftSortReq = useRef(0);
+  const rightSortReq = useRef(0);
+  const filteredSortReq = useRef(0);
+  const comparisonSortReq = useRef(0);
+
+  // Reports a sort failure; the handlers below each call this from their catch block.
+  function sortFailed(err: unknown) {
+    console.error("Failed to sort:", err);
+    notifications.show({
+      color: "red",
+      title: "Sort failed",
+      message: String(err),
+    });
+  }
+
+  // Sorting runs in Rust. Each header click cycles ascending → descending → unsorted. Source
+  // tables sort by id (the store copy is untouched) into a display-only view; the
+  // filter/compare results sort their original-order copy into a separate view. In every case
+  // returning to unsorted just drops the view and shows the original order.
+  async function sortSide(side: "left" | "right", columnIndex: number) {
+    const isLeft = side === "left";
+    const id = isLeft ? leftId : rightId;
+    if (id === null) return;
+    const setView = isLeft ? setLeftView : setRightView;
+    const setSort = isLeft ? setLeftSort : setRightSort;
+    const setPage = isLeft ? setLeftPage : setRightPage;
+    const reqRef = isLeft ? leftSortReq : rightSortReq;
+    const requestId = ++reqRef.current;
+    const next = nextSort(isLeft ? leftSort : rightSort, columnIndex);
+    setPage(1);
+    if (!next) {
+      setView(null);
+      setSort(null);
+      return;
+    }
+    try {
+      const sorted = await invoke<CsvTable>("sort_csv", {
+        id,
+        column: columnIndex,
+        ascending: next.ascending,
+      });
+      if (requestId !== reqRef.current) return;
+      setView(sorted);
+      setSort(next);
+    } catch (err) {
+      sortFailed(err);
+    }
+  }
+
+  async function sortFiltered(columnIndex: number) {
+    if (!filtered) return;
+    const requestId = ++filteredSortReq.current;
+    const next = nextSort(filteredSort, columnIndex);
+    setFilteredPage(1);
+    if (!next) {
+      setFilteredView(null);
+      setFilteredSort(null);
+      return;
+    }
+    try {
+      const sorted = await invoke<CsvTable>("sort_table", {
+        table: filtered,
+        column: columnIndex,
+        ascending: next.ascending,
+      });
+      if (requestId !== filteredSortReq.current) return;
+      setFilteredView(sorted);
+      setFilteredSort(next);
+    } catch (err) {
+      sortFailed(err);
+    }
+  }
+
+  async function sortComparisonResult(columnIndex: number) {
+    if (!comparison) return;
+    const requestId = ++comparisonSortReq.current;
+    const next = nextSort(comparisonSort, columnIndex);
+    setComparisonPage(1);
+    if (!next) {
+      setComparisonView(null);
+      setComparisonSort(null);
+      return;
+    }
+    try {
+      const sorted = await invoke<ComparisonResult>("sort_comparison", {
+        result: comparison,
+        column: columnIndex,
+        ascending: next.ascending,
+      });
+      if (requestId !== comparisonSortReq.current) return;
+      setComparisonView(sorted);
+      setComparisonSort(next);
+    } catch (err) {
+      sortFailed(err);
+    }
+  }
+
   async function exportResult() {
     if (!filtered || filtered.rows.length === 0) return;
     setExporting(true);
     try {
+      // Export what's on screen, including the current sort.
+      const table = filteredView ?? filtered;
       // `save_csv` returns false when the user cancels the save dialog; nothing to do.
-      const saved = await invoke<boolean>("save_csv", { table: filtered });
+      const saved = await invoke<boolean>("save_csv", { table });
       if (saved) {
         notifications.show({
           color: "green",
@@ -599,7 +795,7 @@ function App() {
     setExporting(true);
     try {
       const table = await invoke<CsvTable>("comparison_to_table", {
-        result: comparison,
+        result: comparisonView ?? comparison,
       });
       const saved = await invoke<boolean>("save_csv", { table });
       if (saved) {
@@ -671,21 +867,25 @@ function App() {
       >
         <TablePanel
           title="Left"
-          table={leftTable}
+          table={leftView ?? leftTable}
           path={leftPath}
           loading={leftLoading}
           page={leftPage}
           onPageChange={setLeftPage}
           onLoad={() => loadCsv("left")}
+          sort={leftSort}
+          onSort={(columnIndex) => sortSide("left", columnIndex)}
         />
         <TablePanel
           title="Right"
-          table={rightTable}
+          table={rightView ?? rightTable}
           path={rightPath}
           loading={rightLoading}
           page={rightPage}
           onPageChange={setRightPage}
           onLoad={() => loadCsv("right")}
+          sort={rightSort}
+          onSort={(columnIndex) => sortSide("right", columnIndex)}
         />
       </Box>
 
@@ -755,9 +955,11 @@ function App() {
 
             {filtered ? (
               <CsvTableView
-                table={filtered}
+                table={filteredView ?? filtered}
                 page={filteredPage}
                 onPageChange={setFilteredPage}
+                sort={filteredSort}
+                onSort={sortFiltered}
               />
             ) : (
               <Text c="dimmed" fs="italic">
@@ -812,9 +1014,11 @@ function App() {
 
             {comparison ? (
               <ComparisonTableView
-                result={comparison}
+                result={comparisonView ?? comparison}
                 page={comparisonPage}
                 onPageChange={setComparisonPage}
+                sort={comparisonSort}
+                onSort={sortComparisonResult}
               />
             ) : (
               <Text c="dimmed" fs="italic">
