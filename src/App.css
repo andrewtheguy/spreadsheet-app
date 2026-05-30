@@ -16,26 +16,73 @@
 
 .container {
   margin: 0;
-  padding-top: 10vh;
+  padding: 1em;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  height: 100vh;
+  box-sizing: border-box;
 }
 
-.row {
+.container > h1 {
+  margin: 0 0 0.5em;
+}
+
+.panels {
   display: flex;
-  justify-content: center;
+  gap: 1em;
+  flex: 1;
+  min-height: 0;
+}
+
+.panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  padding: 0.8em;
+  box-sizing: border-box;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  margin-bottom: 0.6em;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 1.1em;
 }
 
 .error {
   color: #c0392b;
-  text-align: center;
+}
+
+.placeholder {
+  color: #888;
+  font-style: italic;
+}
+
+.merged-panel {
+  margin-top: 1em;
+  border: 1px dashed #c0c0c0;
+  border-radius: 8px;
+  padding: 0.8em;
+  min-height: 120px;
+}
+
+.merged-panel h2 {
+  margin: 0 0 0.4em;
+  font-size: 1.1em;
 }
 
 .table-wrapper {
-  margin: 1.5em auto 0;
-  max-width: 95vw;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -130,6 +177,18 @@ button {
 
   .csv-table th {
     background-color: #1f1f1f;
+  }
+
+  .panel {
+    border-color: #444;
+  }
+
+  .merged-panel {
+    border-color: #555;
+  }
+
+  .placeholder {
+    color: #999;
   }
 
   .error {
