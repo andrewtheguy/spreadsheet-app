@@ -4,39 +4,27 @@ import "./App.css";
 
 type CsvTable = { headers: string[]; rows: string[][] };
 
-function App() {
-  const [table, setTable] = useState<CsvTable | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+type TablePanelProps = {
+  title: string;
+  table: CsvTable | null;
+  loading: boolean;
+  error: string;
+  onLoad: () => void;
+};
 
-  async function loadCsv() {
-    setLoading(true);
-    setError("");
-    try {
-      // `load_csv` returns null when the user cancels the dialog; keep the current table.
-      const result = await invoke<CsvTable | null>("load_csv");
-      if (result) setTable(result);
-    } catch (err) {
-      console.error("Failed to load CSV:", err);
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
+function TablePanel({ title, table, loading, error, onLoad }: TablePanelProps) {
   return (
-    <main className="container">
-      <h1>Spreadsheet</h1>
-
-      <div className="row">
-        <button onClick={loadCsv} disabled={loading}>
+    <section className="panel">
+      <div className="panel-header">
+        <h2>{title}</h2>
+        <button onClick={onLoad} disabled={loading}>
           {loading ? "Loading…" : "Load CSV"}
         </button>
       </div>
 
       {error && <p className="error">{error}</p>}
 
-      {table && (
+      {table ? (
         <div className="table-wrapper">
           <table className="csv-table">
             <thead>
@@ -57,7 +45,65 @@ function App() {
             </tbody>
           </table>
         </div>
+      ) : (
+        <p className="placeholder">No spreadsheet loaded.</p>
       )}
+    </section>
+  );
+}
+
+function App() {
+  const [leftTable, setLeftTable] = useState<CsvTable | null>(null);
+  const [leftLoading, setLeftLoading] = useState(false);
+  const [leftError, setLeftError] = useState("");
+
+  const [rightTable, setRightTable] = useState<CsvTable | null>(null);
+  const [rightLoading, setRightLoading] = useState(false);
+  const [rightError, setRightError] = useState("");
+
+  async function loadCsv(
+    setTable: (table: CsvTable) => void,
+    setLoading: (loading: boolean) => void,
+    setError: (error: string) => void,
+  ) {
+    setLoading(true);
+    setError("");
+    try {
+      // `load_csv` returns null when the user cancels the dialog; keep the current table.
+      const result = await invoke<CsvTable | null>("load_csv");
+      if (result) setTable(result);
+    } catch (err) {
+      console.error("Failed to load CSV:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="container">
+      <h1>Spreadsheet Merge</h1>
+
+      <div className="panels">
+        <TablePanel
+          title="Left"
+          table={leftTable}
+          loading={leftLoading}
+          error={leftError}
+          onLoad={() => loadCsv(setLeftTable, setLeftLoading, setLeftError)}
+        />
+        <TablePanel
+          title="Right"
+          table={rightTable}
+          loading={rightLoading}
+          error={rightError}
+          onLoad={() => loadCsv(setRightTable, setRightLoading, setRightError)}
+        />
+      </div>
+
+      <section className="merged-panel">
+        <p className="placeholder">placeholder for now</p>
+      </section>
     </main>
   );
 }
