@@ -340,8 +340,11 @@ fn column_is_numeric<'a>(values: impl Iterator<Item = &'a str>) -> bool {
             continue;
         }
         any_value = true;
-        if trimmed.parse::<f64>().is_err() {
-            return false;
+        // `f64::from_str` accepts "NaN"/"inf"/"infinity"; require a finite value so those
+        // sort as text instead of being treated as numbers.
+        match trimmed.parse::<f64>() {
+            Ok(n) if n.is_finite() => {}
+            _ => return false,
         }
     }
     any_value
@@ -467,6 +470,13 @@ mod sort_tests {
         let t = table(&[&["2", ""], &["1", ""], &["3", "5"]]);
         // Column 1 has a blank and "5": numeric, blank sorts first ascending.
         assert_eq!(col(&sort_rows(&t, 1, true), 1), ["", "", "5"]);
+    }
+
+    #[test]
+    fn non_finite_values_sort_as_text() {
+        // "inf"/"NaN" must not make the column numeric, so it sorts lexicographically.
+        let t = table(&[&["2", "a"], &["10", "b"], &["inf", "c"]]);
+        assert_eq!(col(&sort_rows(&t, 0, true), 0), ["10", "2", "inf"]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Badge,
@@ -662,6 +662,14 @@ function App() {
     setComparisonPage(1);
   }
 
+  // Guards against out-of-order sort responses: every handler bumps its target's token at
+  // the start, and a resolved (or cleared) response is only applied if its token is still
+  // current — so a stale `sort_*` reply can't clobber a newer sort or clear.
+  const leftSortReq = useRef(0);
+  const rightSortReq = useRef(0);
+  const filteredSortReq = useRef(0);
+  const comparisonSortReq = useRef(0);
+
   // Reports a sort failure; the handlers below each call this from their catch block.
   function sortFailed(err: unknown) {
     console.error("Failed to sort:", err);
@@ -683,6 +691,8 @@ function App() {
     const setView = isLeft ? setLeftView : setRightView;
     const setSort = isLeft ? setLeftSort : setRightSort;
     const setPage = isLeft ? setLeftPage : setRightPage;
+    const reqRef = isLeft ? leftSortReq : rightSortReq;
+    const requestId = ++reqRef.current;
     const next = nextSort(isLeft ? leftSort : rightSort, columnIndex);
     setPage(1);
     if (!next) {
@@ -696,6 +706,7 @@ function App() {
         column: columnIndex,
         ascending: next.ascending,
       });
+      if (requestId !== reqRef.current) return;
       setView(sorted);
       setSort(next);
     } catch (err) {
@@ -705,6 +716,7 @@ function App() {
 
   async function sortFiltered(columnIndex: number) {
     if (!filtered) return;
+    const requestId = ++filteredSortReq.current;
     const next = nextSort(filteredSort, columnIndex);
     setFilteredPage(1);
     if (!next) {
@@ -718,6 +730,7 @@ function App() {
         column: columnIndex,
         ascending: next.ascending,
       });
+      if (requestId !== filteredSortReq.current) return;
       setFilteredView(sorted);
       setFilteredSort(next);
     } catch (err) {
@@ -727,6 +740,7 @@ function App() {
 
   async function sortComparisonResult(columnIndex: number) {
     if (!comparison) return;
+    const requestId = ++comparisonSortReq.current;
     const next = nextSort(comparisonSort, columnIndex);
     setComparisonPage(1);
     if (!next) {
@@ -740,6 +754,7 @@ function App() {
         column: columnIndex,
         ascending: next.ascending,
       });
+      if (requestId !== comparisonSortReq.current) return;
       setComparisonView(sorted);
       setComparisonSort(next);
     } catch (err) {
