@@ -17,7 +17,9 @@ import {
 import { notifications } from "@mantine/notifications";
 
 type CsvTable = { headers: string[]; rows: string[][] };
-type LoadedCsv = { table: CsvTable; path: string };
+// `id` is the backend `TableStore` handle; it's sent to filter/compare/common-columns
+// instead of the whole table on every recompute.
+type LoadedCsv = { id: number; table: CsvTable; path: string };
 
 // Mirrors `sheet_core::FilterMode` / `FilterOptions`. `exclude` drops left rows whose value
 // in the chosen column appears in the right's same-named column; `include` keeps only those.
@@ -341,11 +343,13 @@ function ComparisonTableView({
 
 function App() {
   const [leftTable, setLeftTable] = useState<CsvTable | null>(null);
+  const [leftId, setLeftId] = useState<number | null>(null);
   const [leftPath, setLeftPath] = useState<string | null>(null);
   const [leftLoading, setLeftLoading] = useState(false);
   const [leftPage, setLeftPage] = useState(1);
 
   const [rightTable, setRightTable] = useState<CsvTable | null>(null);
+  const [rightId, setRightId] = useState<number | null>(null);
   const [rightPath, setRightPath] = useState<string | null>(null);
   const [rightLoading, setRightLoading] = useState(false);
   const [rightPage, setRightPage] = useState(1);
@@ -377,15 +381,22 @@ function App() {
   // it whenever the inputs change; a cancellation flag drops a stale response if the inputs
   // change again before it resolves.
   useEffect(() => {
-    if (operationMode !== "filter" || !leftTable || !rightTable || !columnValid) {
+    if (
+      operationMode !== "filter" ||
+      !leftTable ||
+      !rightTable ||
+      leftId === null ||
+      rightId === null ||
+      !columnValid
+    ) {
       setFiltered(null);
       return;
     }
     const options: FilterOptions = { mode: filterMode, caseInsensitive };
     let cancelled = false;
     invoke<CsvTable>("filter_csv", {
-      left: leftTable,
-      right: rightTable,
+      leftId,
+      rightId,
       column: rightTable.headers[columnIndex],
       options,
     })
@@ -411,6 +422,8 @@ function App() {
     operationMode,
     leftTable,
     rightTable,
+    leftId,
+    rightId,
     columnIndex,
     columnValid,
     filterMode,
@@ -420,12 +433,12 @@ function App() {
   // The candidate compare columns (header names in both tables) come from Rust. Recompute
   // when either table changes and clear any stale key/value selection.
   useEffect(() => {
-    if (!leftTable || !rightTable) {
+    if (!leftTable || !rightTable || leftId === null || rightId === null) {
       setCommonCols([]);
       return;
     }
     let cancelled = false;
-    invoke<string[]>("common_columns", { left: leftTable, right: rightTable })
+    invoke<string[]>("common_columns", { leftId, rightId })
       .then((cols) => {
         if (cancelled) return;
         setCommonCols(cols);
@@ -440,7 +453,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [leftTable, rightTable]);
+  }, [leftTable, rightTable, leftId, rightId]);
 
   const keyIndex = keyColumn === null ? null : Number(keyColumn);
   const valueIndex = valueColumn === null ? null : Number(valueColumn);
@@ -457,6 +470,8 @@ function App() {
       operationMode !== "compare" ||
       !leftTable ||
       !rightTable ||
+      leftId === null ||
+      rightId === null ||
       !compareValid
     ) {
       setComparison(null);
@@ -464,8 +479,8 @@ function App() {
     }
     let cancelled = false;
     invoke<ComparisonResult>("compare_csv", {
-      left: leftTable,
-      right: rightTable,
+      leftId,
+      rightId,
       keyColumn: commonCols[keyIndex],
       valueColumn: commonCols[valueIndex],
       caseInsensitive,
@@ -492,6 +507,8 @@ function App() {
     operationMode,
     leftTable,
     rightTable,
+    leftId,
+    rightId,
     keyIndex,
     valueIndex,
     compareValid,
@@ -499,18 +516,24 @@ function App() {
     commonCols,
   ]);
 
-  async function loadCsv(
-    setTable: (table: CsvTable) => void,
-    setPath: (path: string) => void,
-    setLoading: (loading: boolean) => void,
-    setPage: (page: number) => void,
-  ) {
+  async function loadCsv(side: "left" | "right") {
+    const isLeft = side === "left";
+    const setTable = isLeft ? setLeftTable : setRightTable;
+    const setId = isLeft ? setLeftId : setRightId;
+    const setPath = isLeft ? setLeftPath : setRightPath;
+    const setLoading = isLeft ? setLeftLoading : setRightLoading;
+    const setPage = isLeft ? setLeftPage : setRightPage;
+    // The side's current table is superseded by this load; pass its id so the backend
+    // store evicts it (null on first load → `None`, nothing to evict).
+    const replace = isLeft ? leftId : rightId;
+
     setLoading(true);
     try {
       // `load_csv` returns null when the user cancels the dialog; keep the current table.
-      const result = await invoke<LoadedCsv | null>("load_csv");
+      const result = await invoke<LoadedCsv | null>("load_csv", { replace });
       if (result) {
         setTable(result.table);
+        setId(result.id);
         setPath(result.path);
         setPage(1);
       }
@@ -529,6 +552,10 @@ function App() {
   function swapSides() {
     setLeftTable(rightTable);
     setRightTable(leftTable);
+    // The tables stay in the backend store under their existing ids; just swap which side
+    // points at which — no reload needed.
+    setLeftId(rightId);
+    setRightId(leftId);
     setLeftPath(rightPath);
     setRightPath(leftPath);
     setLeftPage(1);
@@ -635,9 +662,7 @@ function App() {
           loading={leftLoading}
           page={leftPage}
           onPageChange={setLeftPage}
-          onLoad={() =>
-            loadCsv(setLeftTable, setLeftPath, setLeftLoading, setLeftPage)
-          }
+          onLoad={() => loadCsv("left")}
         />
         <TablePanel
           title="Right"
@@ -646,9 +671,7 @@ function App() {
           loading={rightLoading}
           page={rightPage}
           onPageChange={setRightPage}
-          onLoad={() =>
-            loadCsv(setRightTable, setRightPath, setRightLoading, setRightPage)
-          }
+          onLoad={() => loadCsv("right")}
         />
       </Box>
 
