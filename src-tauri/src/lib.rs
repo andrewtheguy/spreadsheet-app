@@ -329,9 +329,18 @@ pub fn run() {
         // re-prompts for Keychain access on every launch. We don't use Chromium's
         // password manager, so point it at a mock keychain / basic store to stop the
         // prompt entirely. Both switches are no-ops on platforms without a keychain.
+        //
+        // `--disable-webrtc` suppresses the macOS "find devices on your local network"
+        // prompt: WebRTC's ICE/mDNS responder sends multicast that triggers it, and this
+        // app never opens an RTCPeerConnection. It must be a valueless switch — passing
+        // `disable-features=...` instead crashes, because tauri-cef applies command-line
+        // args to every CEF child process and overwrites the renderer's inherited
+        // `--disable-features` list, desyncing Chromium's feature state. Plain switches
+        // duplicate harmlessly across processes; feature-list switches do not.
         .command_line_args([
             ("--use-mock-keychain", None::<&str>),
             ("password-store", Some("basic")),
+            ("--disable-webrtc", None::<&str>),
         ])
         .invoke_handler(tauri::generate_handler![
             open_external,
