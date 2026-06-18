@@ -6,8 +6,10 @@ import {
   Button,
   Checkbox,
   Group,
+  List,
   Pagination,
   Paper,
+  Popover,
   Select,
   SegmentedControl,
   Table,
@@ -215,6 +217,67 @@ function CsvTableView({
         )}
       </Group>
     </Box>
+  );
+}
+
+// Explains how Excel files are interpreted on import. The backend (sheet-core) reads raw cell
+// values and only partially reconstructs Excel's display formatting, so these caveats keep the
+// numbers/dates from looking like bugs. Kept in sync with `parse_excel` / `apply_number_format`.
+function ExcelNotes() {
+  return (
+    <Popover width={420} position="bottom-start" withArrow shadow="md">
+      <Popover.Target>
+        <Button variant="subtle" size="compact-sm" color="gray">
+          Excel notes
+        </Button>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Text fw={600} size="sm" mb={4}>
+          How Excel (.xlsx / .xls) files are read
+        </Text>
+        <Text size="sm" mb="xs">
+          Excel stores the full-precision number and a separate display format; we read the
+          number and reapply the <strong>common</strong> formats — fixed decimals
+          (e.g. <code>30.40</code>), thousands separators, a leading currency symbol, and
+          percent. So a 20%-off price stored as <code>30.400000000000002</code> shows as
+          its formatted value, not the raw double.
+        </Text>
+        <Text fw={600} size="sm" mb={4}>
+          Known limitations &amp; gotchas
+        </Text>
+        <List size="sm" spacing={4}>
+          <List.Item>
+            <strong>Uncommon formats fall back</strong> to the plain number rounded to Excel&apos;s
+            15-digit precision: accounting/negative-in-parentheses, colored or
+            conditional formats, fractions, and scientific notation aren&apos;t reproduced.
+          </List.Item>
+          <List.Item>
+            <strong>Trailing format text is dropped</strong> — a custom format like
+            <code> 0.00&quot; USD&quot;</code> shows <code>30.40</code>, not <code>30.40 USD</code>.
+          </List.Item>
+          <List.Item>
+            <strong>Only single-sheet workbooks</strong> are supported; multi-sheet files are
+            rejected.
+          </List.Item>
+          <List.Item>
+            <strong>Formulas show their last-saved value</strong> — nothing is recalculated on
+            import.
+          </List.Item>
+          <List.Item>
+            <strong>Dates are normalized to ISO 8601</strong>
+            (<code>yyyy-mm-ddThh:mm:ss.mmm</code>), regardless of the sheet&apos;s date format.
+          </List.Item>
+          <List.Item>
+            <strong>Numbers stay numeric</strong> — a code like <code>00123</code> stored as a
+            number loses its leading zeros unless it was stored as text in Excel. Save as CSV to
+            preserve exact text.
+          </List.Item>
+          <List.Item>
+            Styling, colors, merged cells, and hidden rows/columns are ignored — values only.
+          </List.Item>
+        </List>
+      </Popover.Dropdown>
+    </Popover>
   );
 }
 
@@ -887,9 +950,12 @@ function App() {
       }}
     >
       <Group justify="center" pos="relative">
-        <Title order={1} ta="center">
-          CSV / Excel Filter &amp; Compare
-        </Title>
+        <Group gap="xs" align="center">
+          <Title order={1} ta="center">
+            CSV / Excel Filter &amp; Compare
+          </Title>
+          <ExcelNotes />
+        </Group>
         <Button
           variant="default"
           onClick={swapSides}

@@ -3293,8 +3293,10 @@ version = "0.0.1"
 dependencies = [
  "calamine",
  "csv",
+ "quick-xml",
  "rust_xlsxwriter",
  "serde",
+ "zip",
 ]
 
 [[package]]
