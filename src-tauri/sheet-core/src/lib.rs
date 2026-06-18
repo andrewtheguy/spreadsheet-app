@@ -73,27 +73,38 @@ impl ComparisonPreview {
 /// Parses CSV from `reader`, treating the first record as headers. Ragged rows are
 /// accepted and normalized to the header width — short rows are padded with empty strings,
 /// long rows are truncated — so cells stay column-aligned on the frontend.
+///
+/// Cells are read as raw bytes (via [`csv::ByteRecord`]) so files that aren't valid UTF-8
+/// (e.g. Excel exports in Windows-1252) load instead of failing hard: see [`sanitize_field`].
 pub fn parse_csv<R: Read>(reader: R) -> Result<CsvTable, csv::Error> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
         .from_reader(reader);
 
-    let headers: Vec<String> = rdr.headers()?.iter().map(String::from).collect();
+    let headers: Vec<String> = rdr.byte_headers()?.iter().map(sanitize_field).collect();
     let column_count = headers.len();
 
-    let rows = rdr
-        .records()
-        .map(|record| {
-            record.map(|r| {
-                let mut row: Vec<String> = r.iter().map(String::from).collect();
-                row.resize(column_count, String::new());
-                row
-            })
-        })
-        .collect::<Result<Vec<Vec<String>>, _>>()?;
+    let mut rows = Vec::new();
+    let mut record = csv::ByteRecord::new();
+    while rdr.read_byte_record(&mut record)? {
+        let mut row: Vec<String> = record.iter().map(sanitize_field).collect();
+        row.resize(column_count, String::new());
+        rows.push(row);
+    }
 
     Ok(CsvTable { headers, rows })
+}
+
+/// Converts a raw CSV cell to a `String`. Valid UTF-8 is kept intact; otherwise the non-ASCII
+/// bytes are dropped, mirroring Ruby's `encode("US-ASCII", invalid: :replace, undef: :replace,
+/// replace: "")`. Stripping is safe even mid-stream: UTF-8 multi-byte sequences only ever use
+/// bytes `>= 0x80`, so they never collide with the ASCII delimiters/quotes the parser relies on.
+fn sanitize_field(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes.iter().filter(|b| b.is_ascii()).map(|&b| b as char).collect(),
+    }
 }
 
 /// Errors that can occur while loading an Excel workbook into a [`CsvTable`].
@@ -760,6 +771,18 @@ mod tests {
         let parsed = parse_csv("".as_bytes()).unwrap();
         assert!(parsed.headers.is_empty());
         assert!(parsed.rows.is_empty());
+    }
+
+    #[test]
+    fn parse_falls_back_to_stripping_invalid_utf8() {
+        // 0x92 is a Windows-1252 curly apostrophe — invalid as standalone UTF-8. The strict
+        // parse fails, so we drop the non-ASCII byte and parse the rest, like Ruby's
+        // `encode("US-ASCII", invalid: :replace, undef: :replace, replace: "")`.
+        let mut input = b"id,name\nA,O".to_vec();
+        input.push(0x92);
+        input.extend_from_slice(b"Brien\n");
+        let parsed = parse_csv(input.as_slice()).unwrap();
+        assert_eq!(parsed, table(&["id", "name"], &[&["A", "OBrien"]]));
     }
 
     // --- parse_excel ---
