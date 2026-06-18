@@ -207,10 +207,18 @@ fn cell_to_string(cell: &Data) -> String {
 }
 
 fn float_to_string(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 {
-        format!("{value:.0}")
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    // Excel itself only keeps 15 significant digits, so the shortest round-trip of the stored
+    // double can show binary artifacts Excel never displays — a "20% off" price computed as
+    // `38 * 0.8` is stored as 30.400000000000002. calamine can't hand us the cell's display
+    // format, so we re-round to Excel's own 15-digit precision, which collapses it back to 30.4.
+    let rounded: f64 = format!("{value:.14e}").parse().unwrap_or(value);
+    if rounded.fract() == 0.0 && rounded.abs() < 1e15 {
+        format!("{rounded:.0}")
     } else {
-        value.to_string()
+        rounded.to_string()
     }
 }
 
@@ -865,6 +873,18 @@ mod tests {
 
         assert_eq!(parsed.headers, vec!["when".to_string()]);
         assert_eq!(parsed.rows, rows(&[&["2026-05-29T13:14:15.123"]]));
+    }
+
+    // --- float_to_string ---
+
+    #[test]
+    fn float_to_string_rounds_off_binary_artifacts() {
+        // 38 * 0.8 is stored as this exact double; Excel shows 30.4.
+        assert_eq!(float_to_string(38.0 * 0.8), "30.4");
+        assert_eq!(float_to_string(30.400000000000002), "30.4");
+        assert_eq!(float_to_string(0.1 + 0.2), "0.3");
+        assert_eq!(float_to_string(30.0), "30");
+        assert_eq!(float_to_string(1234.56), "1234.56");
     }
 
     // --- write_csv ---
