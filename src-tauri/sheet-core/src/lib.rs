@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
+use quick_xml::events::{BytesStart, Event};
 
 /// A CSV file parsed into a header row plus data rows. Held in the backend store and used by
 /// all the row-matching logic; the UI only ever receives a bounded [`TablePreview`] of it.
@@ -73,27 +74,38 @@ impl ComparisonPreview {
 /// Parses CSV from `reader`, treating the first record as headers. Ragged rows are
 /// accepted and normalized to the header width — short rows are padded with empty strings,
 /// long rows are truncated — so cells stay column-aligned on the frontend.
+///
+/// Cells are read as raw bytes (via [`csv::ByteRecord`]) so files that aren't valid UTF-8
+/// (e.g. Excel exports in Windows-1252) load instead of failing hard: see [`sanitize_field`].
 pub fn parse_csv<R: Read>(reader: R) -> Result<CsvTable, csv::Error> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
         .from_reader(reader);
 
-    let headers: Vec<String> = rdr.headers()?.iter().map(String::from).collect();
+    let headers: Vec<String> = rdr.byte_headers()?.iter().map(sanitize_field).collect();
     let column_count = headers.len();
 
-    let rows = rdr
-        .records()
-        .map(|record| {
-            record.map(|r| {
-                let mut row: Vec<String> = r.iter().map(String::from).collect();
-                row.resize(column_count, String::new());
-                row
-            })
-        })
-        .collect::<Result<Vec<Vec<String>>, _>>()?;
+    let mut rows = Vec::new();
+    let mut record = csv::ByteRecord::new();
+    while rdr.read_byte_record(&mut record)? {
+        let mut row: Vec<String> = record.iter().map(sanitize_field).collect();
+        row.resize(column_count, String::new());
+        rows.push(row);
+    }
 
     Ok(CsvTable { headers, rows })
+}
+
+/// Converts a raw CSV cell to a `String`. Valid UTF-8 is kept intact; otherwise the non-ASCII
+/// bytes are dropped, mirroring Ruby's `encode("US-ASCII", invalid: :replace, undef: :replace,
+/// replace: "")`. Stripping is safe even mid-stream: UTF-8 multi-byte sequences only ever use
+/// bytes `>= 0x80`, so they never collide with the ASCII delimiters/quotes the parser relies on.
+fn sanitize_field(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes.iter().filter(|b| b.is_ascii()).map(|&b| b as char).collect(),
+    }
 }
 
 /// Errors that can occur while loading an Excel workbook into a [`CsvTable`].
@@ -143,6 +155,12 @@ pub fn parse_excel<R: Read + Seek>(mut reader: R) -> Result<CsvTable, ExcelError
         .map_err(ExcelError::Io)?;
     reader.read_to_end(&mut bytes).map_err(ExcelError::Io)?;
 
+    // Recover each cell's display number format before calamine consumes `bytes`. calamine only
+    // hands us the raw stored value, so a price like 30.40 arrives as 30.400000000000002; the
+    // format codes (e.g. "0.00", "$#,##0.00") let us render what the sheet shows. Empty for
+    // non-xlsx (.xls/.xlsb) or any read hiccup — we just fall back to the raw value then.
+    let formats = read_cell_formats(&bytes);
+
     let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes)).map_err(ExcelError::Open)?;
     let names = workbook.sheet_names();
     if names.len() != 1 {
@@ -153,22 +171,36 @@ pub fn parse_excel<R: Read + Seek>(mut reader: R) -> Result<CsvTable, ExcelError
         .worksheet_range(&names[0])
         .map_err(|err| ExcelError::Range(err.to_string()))?;
 
-    let mut excel_rows = range.rows();
-    let Some(header_row) = excel_rows.next() else {
+    // `rows()` yields rows starting at the range's top-left, so add this base to each (row, col)
+    // offset to recover the absolute coordinate that keys `formats`.
+    let (base_row, base_col) = range.start().unwrap_or((0, 0));
+
+    let mut excel_rows = range.rows().enumerate();
+    let Some((_, header_row)) = excel_rows.next() else {
         return Ok(CsvTable {
             headers: Vec::new(),
             rows: Vec::new(),
         });
     };
 
-    let mut headers: Vec<String> = header_row.iter().map(cell_to_string).collect();
+    // Headers are text; never apply a number format to them.
+    let mut headers: Vec<String> = header_row.iter().map(|c| cell_to_string(c, None)).collect();
     while headers.last().is_some_and(|header| header.is_empty()) {
         headers.pop();
     }
     let column_count = headers.len();
     let rows = excel_rows
-        .map(|row| {
-            let mut cells: Vec<String> = row.iter().map(cell_to_string).collect();
+        .map(|(row_offset, row)| {
+            let abs_row = base_row + row_offset as u32;
+            let mut cells: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(col_offset, cell)| {
+                    let abs_col = base_col + col_offset as u32;
+                    let format = formats.get(&(abs_row, abs_col)).map(String::as_str);
+                    cell_to_string(cell, format)
+                })
+                .collect();
             cells.resize(column_count, String::new());
             cells
         })
@@ -177,13 +209,20 @@ pub fn parse_excel<R: Read + Seek>(mut reader: R) -> Result<CsvTable, ExcelError
     Ok(CsvTable { headers, rows })
 }
 
-fn cell_to_string(cell: &Data) -> String {
+/// Converts a cell to its display string. `format` is the cell's Excel number-format code (when
+/// known); numeric cells try to honor it via [`apply_number_format`] and otherwise fall back to
+/// [`float_to_string`].
+fn cell_to_string(cell: &Data, format: Option<&str>) -> String {
     match cell {
         Data::Empty => String::new(),
         Data::String(value) => value.clone(),
         Data::Bool(value) => value.to_string(),
-        Data::Int(value) => value.to_string(),
-        Data::Float(value) => float_to_string(*value),
+        Data::Int(value) => format
+            .and_then(|f| apply_number_format(*value as f64, f))
+            .unwrap_or_else(|| value.to_string()),
+        Data::Float(value) => format
+            .and_then(|f| apply_number_format(*value, f))
+            .unwrap_or_else(|| float_to_string(*value)),
         Data::DateTime(value) => {
             let (year, month, day, hour, minute, second, millisecond) = value.to_ymd_hms_milli();
             format!(
@@ -196,10 +235,312 @@ fn cell_to_string(cell: &Data) -> String {
 }
 
 fn float_to_string(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 {
-        format!("{value:.0}")
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    // Excel itself only keeps 15 significant digits, so the shortest round-trip of the stored
+    // double can show binary artifacts Excel never displays — a "20% off" price computed as
+    // `38 * 0.8` is stored as 30.400000000000002. calamine can't hand us the cell's display
+    // format, so we re-round to Excel's own 15-digit precision, which collapses it back to 30.4.
+    let rounded: f64 = format!("{value:.14e}").parse().unwrap_or(value);
+    if rounded.fract() == 0.0 && rounded.abs() < 1e15 {
+        format!("{rounded:.0}")
     } else {
-        value.to_string()
+        rounded.to_string()
+    }
+}
+
+/// Reads each numeric cell's Excel number-format code from an xlsx package, keyed by absolute
+/// `(row, col)` (both 0-based). An xlsx is a zip: `xl/styles.xml` maps style indices to format
+/// codes, and the worksheet xml tags each cell with its style index. Returns an empty map for
+/// non-xlsx input or any parse failure, so the caller transparently falls back to raw values.
+fn read_cell_formats(bytes: &[u8]) -> HashMap<(u32, u32), String> {
+    let empty = HashMap::new();
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return empty;
+    };
+    let Some(styles) = read_zip_entry(&mut zip, "xl/styles.xml") else {
+        return empty;
+    };
+    let (num_fmts, cell_xfs) = parse_styles(&styles);
+
+    // Single-sheet workbooks (the only kind we accept) have exactly one worksheet xml; its exact
+    // name varies, so find it rather than assuming `sheet1.xml`.
+    let sheet_path = zip
+        .file_names()
+        .find(|name| {
+            name.starts_with("xl/worksheets/") && name.ends_with(".xml") && !name.contains("/_rels/")
+        })
+        .map(String::from);
+    let Some(sheet_path) = sheet_path else {
+        return empty;
+    };
+    let Some(sheet) = read_zip_entry(&mut zip, &sheet_path) else {
+        return empty;
+    };
+    parse_sheet_formats(&sheet, &num_fmts, &cell_xfs)
+}
+
+fn read_zip_entry<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
+    let mut file = zip.by_name(name).ok()?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).ok()?;
+    Some(contents)
+}
+
+/// Value of attribute `key` on `element`, as an owned `String`.
+fn xml_attr(element: &BytesStart, key: &[u8]) -> Option<String> {
+    element
+        .attributes()
+        .flatten()
+        .find(|attr| attr.key.as_ref() == key)
+        .map(|attr| String::from_utf8_lossy(&attr.value).into_owned())
+}
+
+/// Parses `styles.xml` into `(custom numFmtId -> format code, cellXfs index -> numFmtId)`. Only
+/// the `<cellXfs>` block matters (cell-level styles); the same-named `<xf>` under `<cellStyleXfs>`
+/// must be ignored, so we track which block we're inside.
+fn parse_styles(xml: &str) -> (HashMap<u32, String>, Vec<u32>) {
+    let mut num_fmts: HashMap<u32, String> = HashMap::new();
+    let mut cell_xfs: Vec<u32> = Vec::new();
+    let mut in_cell_xfs = false;
+
+    let mut reader = quick_xml::Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.local_name().as_ref() {
+                b"numFmt" => {
+                    if let (Some(id), Some(code)) =
+                        (xml_attr(&e, b"numFmtId"), xml_attr(&e, b"formatCode"))
+                    {
+                        if let Ok(id) = id.parse::<u32>() {
+                            num_fmts.insert(id, code);
+                        }
+                    }
+                }
+                b"cellXfs" => in_cell_xfs = true,
+                b"xf" if in_cell_xfs => {
+                    let id = xml_attr(&e, b"numFmtId")
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    cell_xfs.push(id);
+                }
+                _ => {}
+            },
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"cellXfs" => in_cell_xfs = false,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    (num_fmts, cell_xfs)
+}
+
+/// Parses worksheet xml into `(row, col) -> format code`, resolving each cell's style index
+/// through `cell_xfs`/`num_fmts`. Only cells whose format resolves to a numeric code we handle
+/// are recorded; everything else is left to the raw-value fallback.
+fn parse_sheet_formats(
+    xml: &str,
+    num_fmts: &HashMap<u32, String>,
+    cell_xfs: &[u32],
+) -> HashMap<(u32, u32), String> {
+    let mut formats = HashMap::new();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.local_name().as_ref() == b"c" => {
+                let Some(coord) = xml_attr(&e, b"r").and_then(|r| parse_cell_ref(&r)) else {
+                    continue;
+                };
+                let style_index = xml_attr(&e, b"s")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let num_fmt_id = cell_xfs.get(style_index).copied().unwrap_or(0);
+                if let Some(code) = resolve_format_code(num_fmt_id, num_fmts) {
+                    formats.insert(coord, code);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    formats
+}
+
+/// Converts an A1-style cell reference (e.g. `"B2"`) to a 0-based `(row, col)`.
+fn parse_cell_ref(reference: &str) -> Option<(u32, u32)> {
+    let split = reference.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = reference.split_at(split);
+    if letters.is_empty() {
+        return None;
+    }
+    let mut col = 0u32;
+    for byte in letters.bytes() {
+        if !byte.is_ascii_alphabetic() {
+            return None;
+        }
+        // Reject overlong references rather than overflow (panic in debug, wrap in release).
+        col = col
+            .checked_mul(26)?
+            .checked_add(u32::from(byte.to_ascii_uppercase() - b'A' + 1))?;
+    }
+    let row: u32 = digits.parse().ok()?;
+    Some((row.checked_sub(1)?, col.checked_sub(1)?))
+}
+
+/// Resolves a `numFmtId` to a format code. Custom ids (>= 164) come from the workbook's
+/// `<numFmt>` table; lower ids are Excel built-ins, of which we map only the common numeric ones
+/// — anything else (General, dates, accounting/multi-section built-ins) returns `None` to fall
+/// back to the raw value.
+fn resolve_format_code(num_fmt_id: u32, custom: &HashMap<u32, String>) -> Option<String> {
+    if num_fmt_id >= 164 {
+        return custom.get(&num_fmt_id).cloned();
+    }
+    let builtin = match num_fmt_id {
+        1 => "0",
+        2 => "0.00",
+        3 => "#,##0",
+        4 => "#,##0.00",
+        9 => "0%",
+        10 => "0.00%",
+        _ => return None,
+    };
+    Some(builtin.to_string())
+}
+
+/// Applies an Excel number-format code to `value`, returning the display string. Handles the
+/// pragmatic subset that covers price lists — fixed decimal places, thousands separators, a
+/// leading currency symbol, and percent — and returns `None` for anything outside that subset
+/// (multiple sections, scientific, fractions, dates, text placeholders) so the caller falls
+/// back to [`float_to_string`].
+fn apply_number_format(value: f64, format: &str) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    let format = format.trim();
+    if format.is_empty() || format.eq_ignore_ascii_case("General") {
+        return None;
+    }
+
+    let mut currency = String::new();
+    let mut decimal_places = 0usize;
+    let mut seen_digit = false;
+    let mut in_decimals = false;
+    let mut has_thousands = false;
+    let mut has_percent = false;
+
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // Literals that precede the number become a currency prefix (e.g. `"$"#,##0.00`,
+            // `\$0.00`, or `[$£-809]`); literals after the digits are dropped.
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    if !seen_digit {
+                        currency.push(next);
+                    }
+                }
+            }
+            '"' => {
+                let mut literal = String::new();
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                    literal.push(q);
+                }
+                if !seen_digit {
+                    currency.push_str(&literal);
+                }
+            }
+            '[' => {
+                let mut inner = String::new();
+                for b in chars.by_ref() {
+                    if b == ']' {
+                        break;
+                    }
+                    inner.push(b);
+                }
+                // `[<100]`/`[>=0]` are conditional sections — too complex, so bail. `[$sym-locale]`
+                // carries a currency symbol; `[Red]`/`[$-409]` are color/locale and ignored.
+                if inner.starts_with(['<', '>', '=']) {
+                    return None;
+                }
+                if !seen_digit {
+                    if let Some(rest) = inner.strip_prefix('$') {
+                        currency.push_str(rest.split('-').next().unwrap_or(""));
+                    }
+                }
+            }
+            ';' => return None, // multiple sections (positive;negative;zero;text)
+            'E' | 'e' | '/' => return None, // scientific / fractions
+            'y' | 'Y' | 'm' | 'M' | 'd' | 'D' | 'h' | 'H' | 's' | 'S' | '@' => return None, // date/time/text
+            '%' => has_percent = true,
+            '0' | '#' | '?' => {
+                seen_digit = true;
+                if in_decimals {
+                    decimal_places += 1;
+                }
+            }
+            '.' => {
+                if in_decimals {
+                    return None; // two decimal points: not a format we understand
+                }
+                in_decimals = true;
+            }
+            ',' => {
+                if seen_digit && !in_decimals {
+                    has_thousands = true;
+                }
+            }
+            '$' if !seen_digit => currency.push('$'),
+            _ => {} // spaces and other literal characters
+        }
+    }
+
+    if !seen_digit {
+        return None;
+    }
+
+    let mut scaled = value;
+    if has_percent {
+        scaled *= 100.0;
+    }
+    let negative = scaled.is_sign_negative() && scaled != 0.0;
+    let mut digits = format!("{:.*}", decimal_places, scaled.abs());
+    if has_thousands {
+        digits = group_thousands(&digits);
+    }
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push_str(&currency);
+    out.push_str(&digits);
+    if has_percent {
+        out.push('%');
+    }
+    Some(out)
+}
+
+/// Inserts thousands separators into the integer part of a formatted number like `"1234.50"`,
+/// leaving any decimal part untouched: `"1234.50"` -> `"1,234.50"`.
+fn group_thousands(number: &str) -> String {
+    let (integer, decimal) = match number.split_once('.') {
+        Some((i, d)) => (i, Some(d)),
+        None => (number, None),
+    };
+    let mut grouped = String::with_capacity(integer.len() + integer.len() / 3);
+    let len = integer.len();
+    for (i, ch) in integer.bytes().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch as char);
+    }
+    match decimal {
+        Some(d) => format!("{grouped}.{d}"),
+        None => grouped,
     }
 }
 
@@ -762,6 +1103,18 @@ mod tests {
         assert!(parsed.rows.is_empty());
     }
 
+    #[test]
+    fn parse_falls_back_to_stripping_invalid_utf8() {
+        // 0x92 is a Windows-1252 curly apostrophe — invalid as standalone UTF-8. The strict
+        // parse fails, so we drop the non-ASCII byte and parse the rest, like Ruby's
+        // `encode("US-ASCII", invalid: :replace, undef: :replace, replace: "")`.
+        let mut input = b"id,name\nA,O".to_vec();
+        input.push(0x92);
+        input.extend_from_slice(b"Brien\n");
+        let parsed = parse_csv(input.as_slice()).unwrap();
+        assert_eq!(parsed, table(&["id", "name"], &[&["A", "OBrien"]]));
+    }
+
     // --- parse_excel ---
 
     #[test]
@@ -842,6 +1195,75 @@ mod tests {
 
         assert_eq!(parsed.headers, vec!["when".to_string()]);
         assert_eq!(parsed.rows, rows(&[&["2026-05-29T13:14:15.123"]]));
+    }
+
+    #[test]
+    fn parse_excel_applies_number_formats_to_prices() {
+        // The price is computed as 38 * 0.8 and stored as 30.400000000000002, but the cell's
+        // "$#,##0.00" format makes Excel show $30.40 — and a thousands case to exercise grouping.
+        let bytes = xlsx_bytes(|workbook| {
+            let worksheet = workbook.add_worksheet();
+            let money = Format::new().set_num_format("$#,##0.00");
+            let plain = Format::new().set_num_format("0.00");
+            worksheet.write_string(0, 0, "name")?;
+            worksheet.write_string(0, 1, "price")?;
+            worksheet.write_string(0, 2, "subtotal")?;
+            worksheet.write_string(1, 0, "Gem")?;
+            worksheet.write_number_with_format(1, 1, 38.0 * 0.8, &money)?;
+            worksheet.write_number_with_format(1, 2, 1234.5, &money)?;
+            worksheet.write_string(2, 0, "Plain")?;
+            worksheet.write_number_with_format(2, 1, 30.4, &plain)?;
+            worksheet.write_number(2, 2, 7.0)?; // no format -> raw fallback
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(parsed.headers, vec!["name", "price", "subtotal"]);
+        assert_eq!(
+            parsed.rows,
+            rows(&[
+                &["Gem", "$30.40", "$1,234.50"],
+                &["Plain", "30.40", "7"],
+            ])
+        );
+    }
+
+    // --- apply_number_format ---
+
+    #[test]
+    fn apply_number_format_handles_the_pragmatic_subset() {
+        let f = |v, fmt| apply_number_format(v, fmt);
+        // Fixed decimals round off the binary artifact and pad trailing zeros.
+        assert_eq!(f(38.0 * 0.8, "0.00").as_deref(), Some("30.40"));
+        assert_eq!(f(30.4, "0.00").as_deref(), Some("30.40"));
+        // Thousands separators, currency prefix (literal, escaped, and quoted), and percent.
+        assert_eq!(f(1234.5, "#,##0.00").as_deref(), Some("1,234.50"));
+        assert_eq!(f(1234567.0, "#,##0").as_deref(), Some("1,234,567"));
+        assert_eq!(f(30.4, "$#,##0.00").as_deref(), Some("$30.40"));
+        assert_eq!(f(30.4, "\\$0.00").as_deref(), Some("$30.40"));
+        assert_eq!(f(30.4, "\"$\"0.00").as_deref(), Some("$30.40"));
+        assert_eq!(f(0.305, "0.0%").as_deref(), Some("30.5%"));
+        assert_eq!(f(-5.0, "$#,##0.00").as_deref(), Some("-$5.00"));
+        // Outside the subset -> None so the caller falls back to the raw value.
+        assert_eq!(f(1.0, "General"), None);
+        assert_eq!(f(1.0, ""), None);
+        assert_eq!(f(1.0, "0.00;(0.00)"), None); // multiple sections
+        assert_eq!(f(1.0, "0.00E+00"), None); // scientific
+        assert_eq!(f(1.0, "# ?/?"), None); // fraction
+        assert_eq!(f(1.0, "[<100]0.00"), None); // conditional
+    }
+
+    // --- float_to_string ---
+
+    #[test]
+    fn float_to_string_rounds_off_binary_artifacts() {
+        // 38 * 0.8 is stored as this exact double; Excel shows 30.4.
+        assert_eq!(float_to_string(38.0 * 0.8), "30.4");
+        assert_eq!(float_to_string(30.400000000000002), "30.4");
+        assert_eq!(float_to_string(0.1 + 0.2), "0.3");
+        assert_eq!(float_to_string(30.0), "30");
+        assert_eq!(float_to_string(1234.56), "1234.56");
     }
 
     // --- write_csv ---
@@ -1121,3 +1543,4 @@ mod tests {
         );
     }
 }
+

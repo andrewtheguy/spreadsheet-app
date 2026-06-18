@@ -3289,12 +3289,14 @@ dependencies = [
 
 [[package]]
 name = "sheet-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "calamine",
  "csv",
+ "quick-xml",
  "rust_xlsxwriter",
  "serde",
+ "zip",
 ]
 
 [[package]]
@@ -3356,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "spreadsheet-app"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "open",
  "rfd",
