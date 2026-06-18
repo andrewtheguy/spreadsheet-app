@@ -780,6 +780,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlopen2"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4"
+dependencies = [
+ "dlopen2_derive",
+ "libc",
+ "once_cell",
+ "winapi",
+]
+
+[[package]]
+name = "dlopen2_derive"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3289,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "sheet-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "calamine",
  "csv",
@@ -3358,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "spreadsheet-app"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "open",
  "rfd",
@@ -3522,8 +3545,8 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tauri"
-version = "2.11.1"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+version = "2.11.2"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3569,8 +3592,8 @@ dependencies = [
 
 [[package]]
 name = "tauri-build"
-version = "2.6.1"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+version = "2.6.2"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "anyhow",
  "cargo_toml",
@@ -3589,8 +3612,8 @@ dependencies = [
 
 [[package]]
 name = "tauri-codegen"
-version = "2.6.1"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+version = "2.6.2"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "base64 0.22.1",
  "ico",
@@ -3614,8 +3637,8 @@ dependencies = [
 
 [[package]]
 name = "tauri-macros"
-version = "2.6.1"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+version = "2.6.2"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3627,8 +3650,8 @@ dependencies = [
 
 [[package]]
 name = "tauri-runtime"
-version = "2.11.1"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+version = "2.11.2"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "cookie",
  "dpi",
@@ -3649,17 +3672,19 @@ dependencies = [
 [[package]]
 name = "tauri-runtime-cef"
 version = "0.1.0"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "base64 0.22.1",
  "cef",
  "cef-dll-sys",
  "dioxus-debug-cell",
  "dirs",
+ "dlopen2",
  "gtk",
  "html5ever 0.29.1",
  "http",
  "kuchikiki",
+ "libc",
  "log",
  "objc2",
  "objc2-app-kit",
@@ -3677,8 +3702,8 @@ dependencies = [
 
 [[package]]
 name = "tauri-utils"
-version = "2.9.1"
-source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.7#f603e95bf971c4b665e2efc922db5b8f3256d5ed"
+version = "2.9.2"
+source = "git+https://github.com/tauri-apps/tauri?tag=tauri-cef-v3.0.0-alpha.8#f5c7530354cb66b5859b9f5d11c8ec1a053448b3"
 dependencies = [
  "anyhow",
  "cargo_metadata",
