@@ -378,10 +378,13 @@ fn parse_cell_ref(reference: &str) -> Option<(u32, u32)> {
         if !byte.is_ascii_alphabetic() {
             return None;
         }
-        col = col * 26 + u32::from(byte.to_ascii_uppercase() - b'A' + 1);
+        // Reject overlong references rather than overflow (panic in debug, wrap in release).
+        col = col
+            .checked_mul(26)?
+            .checked_add(u32::from(byte.to_ascii_uppercase() - b'A' + 1))?;
     }
     let row: u32 = digits.parse().ok()?;
-    Some((row.checked_sub(1)?, col - 1))
+    Some((row.checked_sub(1)?, col.checked_sub(1)?))
 }
 
 /// Resolves a `numFmtId` to a format code. Custom ids (>= 164) come from the workbook's
