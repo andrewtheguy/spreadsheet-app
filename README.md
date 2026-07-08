@@ -1,8 +1,9 @@
-# CSV / Excel Filter & Compare
+# Spreadsheet App
 
-A desktop app for filtering and comparing two spreadsheets (CSV or Excel) by a
-shared column. Built with Tauri + React + Mantine, with all spreadsheet logic
-implemented in Rust so the backend stays UI-agnostic and reusable.
+A desktop app for working with spreadsheets (CSV or Excel): filter and compare
+two files by a shared column, and convert between CSV and Excel. Built with
+Tauri + React + Mantine, with all spreadsheet logic implemented in Rust so the
+backend stays UI-agnostic and reusable.
 
 Desktop only — macOS and Windows. No mobile or Linux support.
 
@@ -18,6 +19,10 @@ Desktop only — macOS and Windows. No mobile or Linux support.
   Matched / Diff / Only Left / Only Right, with summary counts.
 - **Sort** any column, and **export** the filtered or compared result back to
   CSV.
+- **Convert** a file between formats: Excel → CSV, or CSV → Excel. The CSV →
+  Excel direction writes every cell as text, so numeric-looking values (leading
+  zeros, long IDs, date-like strings) keep their exact value instead of being
+  auto-converted by Excel on open.
 
 ### Spreadsheet handling notes
 

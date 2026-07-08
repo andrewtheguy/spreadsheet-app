@@ -24,7 +24,7 @@ function App() {
       }}
     >
       <Title order={1} ta="center">
-        Spreadsheet Tools
+        Spreadsheet App
       </Title>
 
       <Tabs
