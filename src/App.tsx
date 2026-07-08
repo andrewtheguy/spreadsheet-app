@@ -39,7 +39,7 @@ function App() {
       >
         <Tabs.List>
           <Tabs.Tab value="filter-compare">Filter &amp; Compare</Tabs.Tab>
-          <Tabs.Tab value="convert">Convert to CSV</Tabs.Tab>
+          <Tabs.Tab value="convert">Convert</Tabs.Tab>
         </Tabs.List>
 
         {/* Both views stay mounted so loaded files persist across tab switches; only the

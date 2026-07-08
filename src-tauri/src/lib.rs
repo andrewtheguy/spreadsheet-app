@@ -107,22 +107,35 @@ async fn load_csv<R: tauri::Runtime>(
     }))
 }
 
-// Opens a native ".csv" save dialog (on the UI thread, as macOS requires) and writes `table` to
-// the chosen path via `sheet-core`. `default_filename` pre-fills the dialog so each caller can
-// suggest a context-specific name. Returns `Ok(false)` when the user cancels so the caller can
-// no-op. Shared by `export_filtered` / `export_comparison`, which write the *full* dataset.
+// The file format `save_table` writes, selecting both the save-dialog filter and the
+// `sheet-core` writer used.
+#[derive(Clone, Copy)]
+enum ExportFormat {
+    Csv,
+    Xlsx,
+}
+
+// Opens a native save dialog (on the UI thread, as macOS requires) and writes `table` to the
+// chosen path via `sheet-core`, in the given `format`. `default_filename` pre-fills the dialog
+// so each caller can suggest a context-specific name. Returns `Ok(false)` when the user cancels
+// so the caller can no-op. Shared by every export command; each writes the *full* dataset.
 async fn save_table<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     table: &CsvTable,
     default_filename: &str,
+    format: ExportFormat,
 ) -> Result<bool, String> {
     // Same main-thread dialog dance as `load_csv`: schedule the modal on the UI thread and hand
     // the chosen path back over a channel.
     let default_filename = default_filename.to_owned();
+    let (filter_label, extension) = match format {
+        ExportFormat::Csv => ("CSV", "csv"),
+        ExportFormat::Xlsx => ("Excel", "xlsx"),
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
         let path = rfd::FileDialog::new()
-            .add_filter("CSV", &["csv"])
+            .add_filter(filter_label, &[extension])
             .set_file_name(default_filename)
             .save_file();
         let _ = tx.send(path);
@@ -135,8 +148,12 @@ async fn save_table<R: tauri::Runtime>(
 
     let file =
         File::create(&path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
-    sheet_core::write_csv(file, table)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    match format {
+        ExportFormat::Csv => sheet_core::write_csv(file, table)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?,
+        ExportFormat::Xlsx => sheet_core::write_xlsx(file, table)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?,
+    }
     Ok(true)
 }
 
@@ -261,9 +278,15 @@ async fn export_filtered<R: tauri::Runtime>(
     // avoid cloning the full (potentially huge) dataset just to pass a reference.
     match sort {
         Some(SortSpec { column, ascending }) => {
-            save_table(&app, &sheet_core::sort_rows(&table, column, ascending), "filtered.csv").await
+            save_table(
+                &app,
+                &sheet_core::sort_rows(&table, column, ascending),
+                "filtered.csv",
+                ExportFormat::Csv,
+            )
+            .await
         }
-        None => save_table(&app, &table, "filtered.csv").await,
+        None => save_table(&app, &table, "filtered.csv", ExportFormat::Csv).await,
     }
 }
 
@@ -285,7 +308,7 @@ async fn export_comparison<R: tauri::Runtime>(
         None => (*result).clone(),
     };
     let table = sheet_core::comparison_to_table(&result);
-    save_table(&app, &table, "comparison.csv").await
+    save_table(&app, &table, "comparison.csv", ExportFormat::Csv).await
 }
 
 // Exports a stored source table (by `TableStore` id) as CSV, used by the Convert use case to
@@ -301,7 +324,23 @@ async fn export_csv<R: tauri::Runtime>(
     default_name: String,
 ) -> Result<bool, String> {
     let table = store.get(id)?;
-    save_table(&app, &table, &default_name).await
+    save_table(&app, &table, &default_name, ExportFormat::Csv).await
+}
+
+// Exports a stored source table (by `TableStore` id) as an Excel workbook, used by the Convert
+// use case to turn a loaded CSV into Excel. `default_name` pre-fills the save dialog (the
+// frontend derives it, e.g. `sales.csv` → `sales.xlsx`). Every cell is written as text (see
+// `sheet_core::write_xlsx`) so numeric-looking values keep their exact bytes. Returns
+// `Ok(false)` when the user cancels.
+#[tauri::command]
+async fn export_xlsx<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: tauri::State<'_, TableStore>,
+    id: u64,
+    default_name: String,
+) -> Result<bool, String> {
+    let table = store.get(id)?;
+    save_table(&app, &table, &default_name, ExportFormat::Xlsx).await
 }
 
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
@@ -369,7 +408,8 @@ pub fn run() {
             sort_comparison,
             export_filtered,
             export_comparison,
-            export_csv
+            export_csv,
+            export_xlsx
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

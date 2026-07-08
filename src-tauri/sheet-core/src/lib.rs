@@ -555,6 +555,78 @@ pub fn write_csv<W: Write>(writer: W, table: &CsvTable) -> Result<(), csv::Error
     Ok(())
 }
 
+/// Errors from [`write_xlsx`]: building the workbook, or writing the finished bytes to the sink.
+#[derive(Debug)]
+pub enum XlsxWriteError {
+    Xlsx(rust_xlsxwriter::XlsxError),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for XlsxWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            XlsxWriteError::Xlsx(err) => write!(f, "failed to build Excel workbook: {err}"),
+            XlsxWriteError::Io(err) => write!(f, "failed to write Excel workbook: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for XlsxWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            XlsxWriteError::Xlsx(err) => Some(err),
+            XlsxWriteError::Io(err) => Some(err),
+        }
+    }
+}
+
+impl From<rust_xlsxwriter::XlsxError> for XlsxWriteError {
+    fn from(err: rust_xlsxwriter::XlsxError) -> Self {
+        XlsxWriteError::Xlsx(err)
+    }
+}
+
+impl From<std::io::Error> for XlsxWriteError {
+    fn from(err: std::io::Error) -> Self {
+        XlsxWriteError::Io(err)
+    }
+}
+
+/// Writes `table` to `writer` as an `.xlsx` workbook with **every cell forced to text** — the
+/// header row and all data cells are written as strings carrying Excel's text number format
+/// (`@`). This is deliberate and is the whole point of the CSV→Excel converter: CSV has no cell
+/// types, so letting Excel auto-detect on open corrupts common values — zip codes / IDs with
+/// leading zeros (`00123` → `123`), long digit strings (shown in scientific notation), and
+/// strings that merely look like dates. Text preserves the CSV field bytes exactly. All values
+/// go into a single worksheet.
+pub fn write_xlsx<W: Write>(mut writer: W, table: &CsvTable) -> Result<(), XlsxWriteError> {
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    // `@` is Excel's text format: it stops Excel from reinterpreting a string cell as a number
+    // or date when the file is opened, so no "number stored as text" auto-conversion happens.
+    let text = rust_xlsxwriter::Format::new().set_num_format("@");
+
+    for (col, header) in table.headers.iter().enumerate() {
+        worksheet.write_string_with_format(0, col as u16, header, &text)?;
+    }
+    for (r, row) in table.rows.iter().enumerate() {
+        // Row 0 is the header, so data starts at row 1. If the table exceeds Excel's row/column
+        // limits (1,048,576 × 16,384), `write_string_with_format` returns an error rather than
+        // writing a corrupt file.
+        let excel_row = (r + 1) as u32;
+        for (col, cell) in row.iter().enumerate() {
+            worksheet.write_string_with_format(excel_row, col as u16, cell, &text)?;
+        }
+    }
+
+    // `save_to_buffer` produces the whole workbook in memory, which we then stream to `writer`.
+    // This keeps the signature generic over any `Write` sink without the `Seek` bound that the
+    // underlying zip writer would otherwise require.
+    let buffer = workbook.save_to_buffer()?;
+    writer.write_all(&buffer)?;
+    Ok(())
+}
+
 /// How [`filter_rows`] treats rows whose value is present in `right`'s column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1308,6 +1380,26 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
 
         assert_eq!(out, "name,price\nGem,$30.40\n\"Comma, Co\",7\n");
+    }
+
+    // --- write_xlsx (CSV → Excel, text-only) ---
+
+    #[test]
+    fn write_xlsx_forces_all_cells_to_text() {
+        // Values Excel would otherwise mangle on open: a leading-zero code, a 20-digit string
+        // (scientific notation), and date-like text. Written as text, they must survive a
+        // parse_excel round-trip byte-for-byte — this is the converter's whole purpose.
+        let original = table(
+            &["code", "big", "when"],
+            &[
+                &["00123", "12345678901234567890", "2026-01-02"],
+                &["007", "42", "3/4/2026"],
+            ],
+        );
+        let mut buf = Vec::new();
+        write_xlsx(&mut buf, &original).unwrap();
+        let parsed = parse_excel(Cursor::new(buf)).unwrap();
+        assert_eq!(parsed, original);
     }
 
     // --- filter_rows ---

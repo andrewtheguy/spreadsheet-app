@@ -17,6 +17,6 @@ serde = { version = "1", features = ["derive"] }
 # features avoids pulling extra compression backends.
 zip = { version = "7", default-features = false, features = ["deflate"] }
 quick-xml = "0.39"
-
-[dev-dependencies]
+# Write xlsx workbooks (the CSV→Excel converter). Also used by the tests to synthesize xlsx
+# fixtures for the Excel parser.
 rust_xlsxwriter = "0.95.0"
