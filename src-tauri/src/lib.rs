@@ -288,6 +288,22 @@ async fn export_comparison<R: tauri::Runtime>(
     save_table(&app, &table, "comparison.csv").await
 }
 
+// Exports a stored source table (by `TableStore` id) as CSV, used by the Convert use case to
+// turn a loaded Excel file into CSV. `default_name` pre-fills the save dialog (the frontend
+// derives it from the source filename, e.g. `sales.xlsx` → `sales.csv`). Returns `Ok(false)`
+// when the user cancels. The Excel→CSV conversion is just `parse_excel` (done at load time) +
+// `write_csv` (inside `save_table`), so no new logic is needed.
+#[tauri::command]
+async fn export_csv<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: tauri::State<'_, TableStore>,
+    id: u64,
+    default_name: String,
+) -> Result<bool, String> {
+    let table = store.get(id)?;
+    save_table(&app, &table, &default_name).await
+}
+
 // Opens a URL in the OS default browser. The CEF runtime renders `target="_blank"`
 // links inside the embedded Chromium webview, so the frontend routes external links
 // here instead.
@@ -352,7 +368,8 @@ pub fn run() {
             sort_filtered,
             sort_comparison,
             export_filtered,
-            export_comparison
+            export_comparison,
+            export_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

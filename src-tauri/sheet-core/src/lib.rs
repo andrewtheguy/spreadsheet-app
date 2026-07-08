@@ -1284,6 +1284,32 @@ mod tests {
         assert!(out.contains("\"x,y\""), "comma cell should be quoted: {out}");
     }
 
+    // --- Excel → CSV conversion path (parse_excel + write_csv) ---
+
+    #[test]
+    fn excel_to_csv_converts_via_parse_then_write() {
+        // The Convert use case is exactly this composition: read an Excel file into a CsvTable,
+        // then write it as CSV. Numbers become their formatted text, matching parse_excel.
+        let bytes = xlsx_bytes(|workbook| {
+            let worksheet = workbook.add_worksheet();
+            let money = Format::new().set_num_format("$#,##0.00");
+            worksheet.write_string(0, 0, "name")?;
+            worksheet.write_string(0, 1, "price")?;
+            worksheet.write_string(1, 0, "Gem")?;
+            worksheet.write_number_with_format(1, 1, 38.0 * 0.8, &money)?;
+            worksheet.write_string(2, 0, "Comma, Co")?;
+            worksheet.write_number(2, 1, 7.0)?;
+            Ok(())
+        });
+
+        let parsed = parse_excel(Cursor::new(bytes)).unwrap();
+        let mut buf = Vec::new();
+        write_csv(&mut buf, &parsed).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+
+        assert_eq!(out, "name,price\nGem,$30.40\n\"Comma, Co\",7\n");
+    }
+
     // --- filter_rows ---
 
     fn opts(mode: FilterMode, case_insensitive: bool) -> FilterOptions {
