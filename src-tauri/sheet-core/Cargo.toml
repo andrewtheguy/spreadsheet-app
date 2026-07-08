@@ -1,6 +1,6 @@
 [package]
 name = "sheet-core"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 
 # Pure CSV parsing, serializing, and row-matching logic with no Tauri/CEF dependencies, so
