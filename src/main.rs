@@ -258,6 +258,86 @@ fn run_ui() -> Result<(), slint::PlatformError> {
         move || update(&weak, &state, |app| app.clear_sorts())
     });
 
+    ui.on_cell_clicked({
+        let weak = ui.as_weak();
+        let state = state.clone();
+        move |target, row, column, extend| {
+            let Some(target) = core_target(target) else {
+                return;
+            };
+            update(&weak, &state, |app| {
+                app.select_cell(target, row.max(0) as usize, column.max(0) as usize, extend)
+            });
+        }
+    });
+
+    ui.on_step_selection({
+        let weak = ui.as_weak();
+        let state = state.clone();
+        move |delta| {
+            update(&weak, &state, |app| {
+                let Some(target) = selection_or_default(app) else {
+                    return;
+                };
+                let (rows, columns) = view::display_size(app, target);
+                app.step_selection_row(target, rows, columns, delta);
+            })
+        }
+    });
+
+    ui.on_select_all_rows({
+        let weak = ui.as_weak();
+        let state = state.clone();
+        move || {
+            update(&weak, &state, |app| {
+                let Some(target) = selection_or_default(app) else {
+                    return;
+                };
+                let (rows, columns) = view::display_size(app, target);
+                app.select_all_rows(target, rows, columns);
+            })
+        }
+    });
+
+    ui.on_clear_selection({
+        let weak = ui.as_weak();
+        let state = state.clone();
+        move || update(&weak, &state, |app| app.clear_selection())
+    });
+
+    ui.on_copy_selection({
+        let weak = ui.as_weak();
+        let state = state.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let copied = view::selection_tsv(&state.lock().unwrap());
+            match copied {
+                Some((text, label)) => copy_to_clipboard(&ui, text, &label),
+                None => notify(&ui, "Nothing to copy", true),
+            }
+        }
+    });
+
+    ui.on_copy_table({
+        let weak = ui.as_weak();
+        let state = state.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let copied = {
+                let app = state.lock().unwrap();
+                selection_or_default(&app).and_then(|target| view::table_tsv(&app, target))
+            };
+            match copied {
+                Some((text, label)) => copy_to_clipboard(&ui, text, &label),
+                None => notify(&ui, "Nothing to copy", true),
+            }
+        }
+    });
+
     ui.on_clear_message({
         let weak = ui.as_weak();
         move || {
@@ -278,6 +358,32 @@ fn core_side(side: Side) -> state::Side {
         Side::Left => state::Side::Left,
         Side::Right => state::Side::Right,
     }
+}
+
+/// `None` for `SelectionTarget::None`, which only travels UI → Rust as "nothing selected".
+fn core_target(target: SelectionTarget) -> Option<state::TableTarget> {
+    match target {
+        SelectionTarget::None => None,
+        SelectionTarget::Left => Some(state::TableTarget::Panel(state::Side::Left)),
+        SelectionTarget::Right => Some(state::TableTarget::Panel(state::Side::Right)),
+        SelectionTarget::Result => Some(state::TableTarget::Result),
+    }
+}
+
+fn ui_target(target: state::TableTarget) -> SelectionTarget {
+    match target {
+        state::TableTarget::Panel(state::Side::Left) => SelectionTarget::Left,
+        state::TableTarget::Panel(state::Side::Right) => SelectionTarget::Right,
+        state::TableTarget::Result => SelectionTarget::Result,
+    }
+}
+
+/// The table the selection-by-keyboard and Copy Table actions operate on: the one holding the
+/// selection, else the default copy target (result first, then the loaded panels).
+fn selection_or_default(app: &AppState) -> Option<state::TableTarget> {
+    app.selection()
+        .map(|selection| selection.target)
+        .or_else(|| view::default_copy_target(app))
 }
 
 /// Maps a picker selection back to a column index. Index 0 is the placeholder, so it means
@@ -400,6 +506,30 @@ fn refresh(ui: &MainWindow, app: &AppState) {
     ui.set_exporting(app.exporting);
     ui.set_can_export(app.can_export());
 
+    let selection = app.selection();
+    ui.set_can_copy(selection.is_some());
+    // Mirrors what `on_copy_table` will actually do, so the menu item can't enable for a
+    // table that displays no rows (where `default_copy_target` would find nothing to copy).
+    ui.set_can_copy_table(selection_or_default(app).is_some());
+    match selection {
+        Some(selection) => {
+            let (first_row, last_row) = selection.row_bounds();
+            let (first_column, last_column) = selection.column_bounds();
+            ui.set_selection_target(ui_target(selection.target));
+            ui.set_selection_start_row(first_row as i32);
+            ui.set_selection_end_row(last_row as i32);
+            ui.set_selection_start_column(first_column as i32);
+            ui.set_selection_end_column(last_column as i32);
+        }
+        None => {
+            ui.set_selection_target(SelectionTarget::None);
+            ui.set_selection_start_row(-1);
+            ui.set_selection_end_row(-1);
+            ui.set_selection_start_column(-1);
+            ui.set_selection_end_column(-1);
+        }
+    }
+
     // The filter picker lists the *right* table's columns; the compare pickers list the names
     // the two tables share. Both are prefixed with the placeholder.
     let mut filter_columns = vec![PICKER_PLACEHOLDER.to_string()];
@@ -503,6 +633,17 @@ fn refresh_panel(ui: &MainWindow, app: &AppState, side: state::Side) {
                 ui.set_right_columns(model);
             }
         }
+    }
+}
+
+/// Puts `text` on the system clipboard and reports the outcome in the status strip. The
+/// clipboard handle is opened per copy rather than held — holding one keeps this app registered
+/// as the clipboard owner for the whole session.
+fn copy_to_clipboard(ui: &MainWindow, text: String, label: &str) {
+    let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
+    match result {
+        Ok(()) => notify(ui, &format!("Copied {label}"), false),
+        Err(error) => notify(ui, &format!("Copy failed: {error}"), true),
     }
 }
 

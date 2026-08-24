@@ -27,6 +27,45 @@ pub enum OperationMode {
     Compare,
 }
 
+/// Which displayed table a row selection lives in: one of the two source panels, or the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableTarget {
+    Panel(Side),
+    Result,
+}
+
+/// A rectangular block of selected cells in one displayed table, in *display* row/column
+/// indices (blank rows dropped, preview capped). The `anchor` cell is where the selection
+/// started and the `cursor` cell is the latest click or step; each axis is stored unordered so
+/// shift-clicking above or left of the anchor works, and the `*_bounds` accessors order them
+/// for rendering and copying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub target: TableTarget,
+    pub anchor_row: usize,
+    pub anchor_column: usize,
+    pub cursor_row: usize,
+    pub cursor_column: usize,
+}
+
+impl Selection {
+    /// The selected rows as an ordered `(first, last)` pair, both inclusive.
+    pub fn row_bounds(&self) -> (usize, usize) {
+        (
+            self.anchor_row.min(self.cursor_row),
+            self.anchor_row.max(self.cursor_row),
+        )
+    }
+
+    /// The selected columns as an ordered `(first, last)` pair, both inclusive.
+    pub fn column_bounds(&self) -> (usize, usize) {
+        (
+            self.anchor_column.min(self.cursor_column),
+            self.anchor_column.max(self.cursor_column),
+        )
+    }
+}
+
 /// Which column a table is sorted by, and in which direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SortState {
@@ -163,6 +202,10 @@ pub struct AppState {
     filtered: Option<Derived<CsvTable, TablePreview>>,
     comparison: Option<Derived<ComparisonResult, ComparisonPreview>>,
 
+    /// The cells the Copy actions operate on. At most one selection exists across all three
+    /// tables, and it's dropped whenever the table it points into changes under it.
+    selection: Option<Selection>,
+
     /// True while a save dialog is open or an export is being written.
     pub exporting: bool,
 }
@@ -183,6 +226,7 @@ impl Default for AppState {
             value_column: None,
             filtered: None,
             comparison: None,
+            selection: None,
             exporting: false,
         }
     }
@@ -220,6 +264,7 @@ impl AppState {
         if side == Side::Right {
             self.filter_column = None;
         }
+        self.drop_selection_in(TableTarget::Panel(side));
         self.refresh_common_columns();
         self.recompute();
     }
@@ -230,6 +275,8 @@ impl AppState {
     pub fn swap(&mut self) {
         std::mem::swap(&mut self.left, &mut self.right);
         self.filter_column = None;
+        // A panel selection would keep its side while the data moved to the other one.
+        self.selection = None;
         self.refresh_common_columns();
         self.recompute();
     }
@@ -271,6 +318,90 @@ impl AppState {
         let panel = self.panel_mut(side);
         panel.sort = sort;
         panel.sorted = sorted;
+        self.drop_selection_in(TableTarget::Panel(side));
+    }
+
+    // --- Row selection ----------------------------------------------------------------
+
+    pub fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+
+    /// Selects the cell at (`row`, `column`) in `target`. `extend` (shift-click) keeps the
+    /// current anchor and moves the cursor, so the selection becomes the rectangle between
+    /// them; without it — or when the click lands in a different table — the selection
+    /// collapses to the clicked cell.
+    pub fn select_cell(&mut self, target: TableTarget, row: usize, column: usize, extend: bool) {
+        self.selection = Some(match self.selection {
+            Some(selection) if extend && selection.target == target => Selection {
+                cursor_row: row,
+                cursor_column: column,
+                ..selection
+            },
+            _ => Selection {
+                target,
+                anchor_row: row,
+                anchor_column: column,
+                cursor_row: row,
+                cursor_column: column,
+            },
+        });
+    }
+
+    /// Selects every displayed cell of `target`; an empty table clears instead. The counts are
+    /// the caller's because what's *displayed* (blank rows dropped, preview capped) is the view
+    /// layer's call — see `view::display_size`.
+    pub fn select_all_rows(&mut self, target: TableTarget, rows: usize, columns: usize) {
+        self.selection = (rows > 0 && columns > 0).then(|| Selection {
+            target,
+            anchor_row: 0,
+            anchor_column: 0,
+            cursor_row: rows - 1,
+            cursor_column: columns - 1,
+        });
+    }
+
+    /// Keyboard equivalent of clicking the row above/below the cursor: selects the single row
+    /// stepped to by `delta`, clamped to the table. The row is selected full-width — the menu
+    /// items say "Select … Row" — even when stepping away from a narrower cell selection. With
+    /// nothing selected in `target` it starts at the top (stepping down) or the bottom
+    /// (stepping up).
+    pub fn step_selection_row(
+        &mut self,
+        target: TableTarget,
+        rows: usize,
+        columns: usize,
+        delta: i32,
+    ) {
+        if rows == 0 || columns == 0 {
+            return;
+        }
+        let row = match self.selection {
+            Some(selection) if selection.target == target => {
+                (selection.cursor_row as i64 + delta as i64).clamp(0, rows as i64 - 1) as usize
+            }
+            _ if delta >= 0 => 0,
+            _ => rows - 1,
+        };
+        self.selection = Some(Selection {
+            target,
+            anchor_row: row,
+            anchor_column: 0,
+            cursor_row: row,
+            cursor_column: columns - 1,
+        });
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// Drops the selection when the table it points into changes under it — different rows, or
+    /// the same rows in a different order, would silently select different data.
+    fn drop_selection_in(&mut self, target: TableTarget) {
+        if self.selection.is_some_and(|selection| selection.target == target) {
+            self.selection = None;
+        }
     }
 
     // --- Operation inputs -----------------------------------------------------------
@@ -450,6 +581,7 @@ impl AppState {
     }
 
     fn apply_result_sort(&mut self, sort: Option<SortState>) {
+        self.drop_selection_in(TableTarget::Result);
         match self.mode {
             OperationMode::Filter => {
                 if let Some(derived) = self.filtered.as_mut() {
@@ -538,6 +670,7 @@ impl AppState {
     fn recompute(&mut self) {
         self.filtered = None;
         self.comparison = None;
+        self.drop_selection_in(TableTarget::Result);
 
         let (Some(left), Some(right)) = (self.left.table().cloned(), self.right.table().cloned())
         else {
@@ -800,6 +933,96 @@ mod tests {
         app.set_table(Side::Right, table(&["other"], &[&["x"]]), "/tmp/other.csv".into());
         assert_eq!(app.filter_column(), None);
         assert!(app.common_columns().is_empty());
+    }
+
+    #[test]
+    fn clicking_selects_a_cell_and_shift_click_extends_a_rectangle() {
+        let mut app = loaded();
+        let target = TableTarget::Panel(Side::Left);
+
+        app.select_cell(target, 1, 1, false);
+        assert_eq!(app.selection().unwrap().row_bounds(), (1, 1));
+        assert_eq!(app.selection().unwrap().column_bounds(), (1, 1));
+
+        // Extending up-and-left still yields ordered ranges on both axes.
+        app.select_cell(target, 0, 0, true);
+        assert_eq!(app.selection().unwrap().row_bounds(), (0, 1));
+        assert_eq!(app.selection().unwrap().column_bounds(), (0, 1));
+
+        // A shift-click in a *different* table starts a fresh selection there.
+        app.select_cell(TableTarget::Result, 2, 0, true);
+        let selection = app.selection().unwrap();
+        assert_eq!(selection.target, TableTarget::Result);
+        assert_eq!(selection.row_bounds(), (2, 2));
+        assert_eq!(selection.column_bounds(), (0, 0));
+    }
+
+    #[test]
+    fn stepping_the_selection_clamps_and_selects_the_full_row() {
+        let mut app = loaded();
+        let target = TableTarget::Panel(Side::Left);
+
+        // Stepping up with nothing selected starts at the bottom.
+        app.step_selection_row(target, 3, 2, -1);
+        assert_eq!(app.selection().unwrap().row_bounds(), (2, 2));
+        assert_eq!(app.selection().unwrap().column_bounds(), (0, 1));
+        app.step_selection_row(target, 3, 2, 1);
+        assert_eq!(app.selection().unwrap().row_bounds(), (2, 2));
+
+        app.clear_selection();
+        app.step_selection_row(target, 3, 2, 1);
+        assert_eq!(app.selection().unwrap().row_bounds(), (0, 0));
+        app.step_selection_row(target, 3, 2, -1);
+        assert_eq!(app.selection().unwrap().row_bounds(), (0, 0));
+
+        // Stepping away from a single-cell selection widens to the whole row.
+        app.select_cell(target, 0, 1, false);
+        app.step_selection_row(target, 3, 2, 1);
+        assert_eq!(app.selection().unwrap().row_bounds(), (1, 1));
+        assert_eq!(app.selection().unwrap().column_bounds(), (0, 1));
+
+        // An empty table is a no-op, not a phantom selection.
+        app.clear_selection();
+        app.step_selection_row(target, 0, 2, 1);
+        assert!(app.selection().is_none());
+    }
+
+    #[test]
+    fn select_all_rows_covers_the_counts_and_an_empty_table_clears() {
+        let mut app = loaded();
+        app.select_all_rows(TableTarget::Result, 4, 3);
+        assert_eq!(app.selection().unwrap().row_bounds(), (0, 3));
+        assert_eq!(app.selection().unwrap().column_bounds(), (0, 2));
+        app.select_all_rows(TableTarget::Result, 0, 3);
+        assert!(app.selection().is_none());
+    }
+
+    #[test]
+    fn selection_is_dropped_when_its_table_changes() {
+        let mut app = loaded();
+        app.set_filter_column(Some(0));
+
+        // Recomputing the result invalidates a result selection…
+        app.select_cell(TableTarget::Result, 0, 0, false);
+        app.toggle_case_insensitive();
+        assert!(app.selection().is_none());
+
+        // …but leaves a panel selection alone, which only that panel's changes drop.
+        app.select_cell(TableTarget::Panel(Side::Left), 0, 0, false);
+        app.toggle_case_insensitive();
+        assert!(app.selection().is_some());
+        app.sort_panel(Side::Left, 0);
+        assert!(app.selection().is_none());
+
+        app.select_cell(TableTarget::Panel(Side::Left), 0, 0, false);
+        app.sort_panel(Side::Right, 0);
+        assert!(app.selection().is_some());
+        app.set_table(Side::Left, left(), "/tmp/reload.csv".into());
+        assert!(app.selection().is_none());
+
+        app.select_cell(TableTarget::Panel(Side::Right), 1, 0, false);
+        app.swap();
+        assert!(app.selection().is_none());
     }
 
     #[test]

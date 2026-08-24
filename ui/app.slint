@@ -18,6 +18,15 @@ export enum OperationMode {
     compare,
 }
 
+// Which table holds the row selection the Copy actions operate on. Mirrors
+// `state::TableTarget`, plus `none` for "no selection anywhere".
+export enum SelectionTarget {
+    none,
+    left,
+    right,
+    result,
+}
+
 // A pair of buttons acting as a segmented control: the active one is drawn as `primary`.
 component SegmentedPair {
     in property <string> first;
@@ -127,9 +136,14 @@ component TablePanel inherits Panel {
     in property <string> status;
     in-out property <[TableColumn]> columns;
     in property <[DataRow]> rows;
+    in property <int> selection-start-row: -1;
+    in property <int> selection-end-row: -1;
+    in property <int> selection-start-column: -1;
+    in property <int> selection-end-column: -1;
 
     callback load();
     callback header-clicked(column: int);
+    callback cell-clicked(row: int, column: int, extend: bool);
 
     VerticalLayout {
         padding: Theme.panel-padding;
@@ -172,8 +186,15 @@ component TablePanel inherits Panel {
         if root.has-table: DataTable {
             columns <=> root.columns;
             rows: root.rows;
+            selection-start-row: root.selection-start-row;
+            selection-end-row: root.selection-end-row;
+            selection-start-column: root.selection-start-column;
+            selection-end-column: root.selection-end-column;
             header-clicked(column) => {
                 root.header-clicked(column);
+            }
+            cell-clicked(row, column, extend) => {
+                root.cell-clicked(row, column, extend);
             }
         }
 
@@ -229,6 +250,20 @@ export component MainWindow inherits Window {
 
     in property <bool> can-swap;
 
+    // --- Cell selection ---------------------------------------------------------------
+    // At most one table has a selection; the bounds are inclusive display row/column indices,
+    // already ordered by the Rust side, and -1 when nothing is selected.
+    in property <SelectionTarget> selection-target;
+    in property <int> selection-start-row: -1;
+    in property <int> selection-end-row: -1;
+    in property <int> selection-start-column: -1;
+    in property <int> selection-end-column: -1;
+    in property <bool> can-copy;
+    // Whether Copy Table has a table to act on: the selection's table, else the fallback
+    // target. Computed in Rust so the menu can't enable when the copy would be a no-op
+    // (e.g. a loaded file whose rows are all blank displays no rows).
+    in property <bool> can-copy-table;
+
     // --- Operation panel --------------------------------------------------------------
     in property <OperationMode> mode;
     // Two-way: the CheckBox and ComboBoxes below write these on interaction, so a one-way
@@ -276,6 +311,17 @@ export component MainWindow inherits Window {
     callback export-result();
     // Fired once the status strip has been visible long enough to be read.
     callback clear-message();
+
+    // Cell selection and clipboard. Copy puts the selected cells on the clipboard as
+    // tab-separated text; Copy Table does the whole table (headers included) that holds the
+    // selection, falling back to the result table — else the first loaded panel — when nothing
+    // is selected.
+    callback cell-clicked(target: SelectionTarget, row: int, column: int, extend: bool);
+    callback copy-selection();
+    callback copy-table();
+    callback step-selection(delta: int);
+    callback select-all-rows();
+    callback clear-selection();
 
     // Keyboard-only equivalents of the mouse interactions above, driven by the menu bar.
     callback toggle-filter-exclude();
@@ -341,6 +387,65 @@ export component MainWindow inherits Window {
                 enabled: root.can-export && !root.exporting;
                 activated => {
                     root.export-result();
+                }
+            }
+        }
+
+        Menu {
+            title: "Edit";
+
+            MenuItem {
+                title: "Copy";
+                shortcut: @keys(Control + C);
+                enabled: root.can-copy;
+                activated => {
+                    root.copy-selection();
+                }
+            }
+
+            MenuItem {
+                title: "Copy Table with Headers";
+                shortcut: @keys(Control + Shift + C);
+                enabled: root.can-copy-table;
+                activated => {
+                    root.copy-table();
+                }
+            }
+
+            MenuSeparator { }
+
+            // The keyboard route to a selection: steps within the table that already has one,
+            // or starts in the result table (else the first loaded panel). Ranges still need
+            // shift-click.
+            MenuItem {
+                title: "Select Next Row";
+                shortcut: @keys(Control + Shift + DownArrow);
+                activated => {
+                    root.step-selection(1);
+                }
+            }
+
+            MenuItem {
+                title: "Select Previous Row";
+                shortcut: @keys(Control + Shift + UpArrow);
+                activated => {
+                    root.step-selection(-1);
+                }
+            }
+
+            MenuItem {
+                title: "Select All Rows";
+                shortcut: @keys(Control + A);
+                activated => {
+                    root.select-all-rows();
+                }
+            }
+
+            MenuItem {
+                title: "Clear Selection";
+                enabled: root.can-copy;
+                activated => {
+                    root.clear-selection();
                 }
             }
         }
@@ -597,6 +702,7 @@ export component MainWindow inherits Window {
             keys: @keys(Escape);
             activated => {
                 root.clear-message();
+                root.clear-selection();
             }
         }
 
@@ -691,11 +797,18 @@ export component MainWindow inherits Window {
                     status: root.left-status;
                     columns <=> root.left-columns;
                     rows: root.left-rows;
+                    selection-start-row: root.selection-target == SelectionTarget.left ? root.selection-start-row : -1;
+                    selection-end-row: root.selection-target == SelectionTarget.left ? root.selection-end-row : -1;
+                    selection-start-column: root.selection-target == SelectionTarget.left ? root.selection-start-column : -1;
+                    selection-end-column: root.selection-target == SelectionTarget.left ? root.selection-end-column : -1;
                     load => {
                         root.load-file(Side.left);
                     }
                     header-clicked(column) => {
                         root.sort-panel(Side.left, column);
+                    }
+                    cell-clicked(row, column, extend) => {
+                        root.cell-clicked(SelectionTarget.left, row, column, extend);
                     }
                 }
 
@@ -707,11 +820,18 @@ export component MainWindow inherits Window {
                     status: root.right-status;
                     columns <=> root.right-columns;
                     rows: root.right-rows;
+                    selection-start-row: root.selection-target == SelectionTarget.right ? root.selection-start-row : -1;
+                    selection-end-row: root.selection-target == SelectionTarget.right ? root.selection-end-row : -1;
+                    selection-start-column: root.selection-target == SelectionTarget.right ? root.selection-start-column : -1;
+                    selection-end-column: root.selection-target == SelectionTarget.right ? root.selection-end-column : -1;
                     load => {
                         root.load-file(Side.right);
                     }
                     header-clicked(column) => {
                         root.sort-panel(Side.right, column);
+                    }
+                    cell-clicked(row, column, extend) => {
+                        root.cell-clicked(SelectionTarget.right, row, column, extend);
                     }
                 }
             }
@@ -848,8 +968,15 @@ export component MainWindow inherits Window {
                     if root.result-has-table: DataTable {
                         columns <=> root.result-columns;
                         rows: root.result-rows;
+                        selection-start-row: root.selection-target == SelectionTarget.result ? root.selection-start-row : -1;
+                        selection-end-row: root.selection-target == SelectionTarget.result ? root.selection-end-row : -1;
+                        selection-start-column: root.selection-target == SelectionTarget.result ? root.selection-start-column : -1;
+                        selection-end-column: root.selection-target == SelectionTarget.result ? root.selection-end-column : -1;
                         header-clicked(column) => {
                             root.sort-result(column);
+                        }
+                        cell-clicked(row, column, extend) => {
+                            root.cell-clicked(SelectionTarget.result, row, column, extend);
                         }
                     }
 
@@ -962,6 +1089,14 @@ export component MainWindow inherits Window {
 
                     Rectangle { height: 8px; }
 
+                    ShortcutRow { keys: "Click / Shift+Click"; action: "Select a cell / extend to a range"; }
+                    ShortcutRow { keys: "Ctrl+C"; action: "Copy the selected cells (tab-separated)"; }
+                    ShortcutRow { keys: "Ctrl+Shift+C"; action: "Copy the whole table with headers"; }
+                    ShortcutRow { keys: "Ctrl+Shift+↓ / ↑"; action: "Select the next / previous row"; }
+                    ShortcutRow { keys: "Ctrl+A"; action: "Select all rows"; }
+
+                    Rectangle { height: 8px; }
+
                     ShortcutRow { keys: "Ctrl+1 / Ctrl+2"; action: "Filter / Compare mode"; }
                     ShortcutRow { keys: "Ctrl+D"; action: "Toggle Exclude / Include"; }
                     ShortcutRow { keys: "Ctrl+I"; action: "Toggle case-insensitive matching"; }
@@ -986,7 +1121,7 @@ export component MainWindow inherits Window {
 
                     ShortcutRow { keys: "Ctrl+K"; action: "Excel notes"; }
                     ShortcutRow { keys: "Ctrl+/"; action: "This list"; }
-                    ShortcutRow { keys: "Esc"; action: "Dismiss the status message"; }
+                    ShortcutRow { keys: "Esc"; action: "Dismiss the message and clear the selection"; }
                 }
             }
         }
