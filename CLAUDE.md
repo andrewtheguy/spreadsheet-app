@@ -21,6 +21,11 @@
 - Every action is reachable from the `MenuBar` in `ui/app.slint`, which is also
   where its keyboard shortcut lives. Add new actions there too — on macOS it
   becomes the system menu bar, which is what UI automation drives during QA.
+- Slint's `font-family` takes a single family name with no fallback list, so the
+  native UI font is chosen per-OS in `ui_font()` and pushed into the window's
+  `default-font-family`. Without it the renderer's font database picks, which
+  means Helvetica on macOS. `SPREADSHEET_APP_UI_FONT` overrides it for
+  comparisons.
 - `cargo run` is enough to launch the app.
 - Slint's default renderer needs an OpenGL 3 driver, which RDP sessions, VMs and
   Windows Server don't have. `main.rs` relaunches itself once with

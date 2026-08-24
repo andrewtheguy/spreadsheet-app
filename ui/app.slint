@@ -202,6 +202,12 @@ export component MainWindow inherits Window {
     min-width: 900px;
     min-height: 620px;
 
+    // Slint's `font-family` takes one family name and has no fallback list, so the platform's
+    // native UI font is picked in Rust and pushed in here. Without it the renderer falls back to
+    // whatever its font database calls the default sans, which is Helvetica on macOS.
+    in property <string> ui-font;
+    default-font-family: root.ui-font;
+
     // --- Transient status strip (errors, export confirmations) -------------------------
     in property <string> message;
     in property <bool> message-is-error;

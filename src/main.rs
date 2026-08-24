@@ -79,8 +79,31 @@ fn relaunch_with_software_renderer() -> Option<ExitCode> {
     status.success().then_some(ExitCode::SUCCESS)
 }
 
+/// The family name of the platform's native UI font. Slint takes a single family with no
+/// fallback list, so this can't be expressed in the markup; leaving it unset means the
+/// renderer's font database picks for us, and on macOS that means Helvetica rather than the
+/// system font. `SPREADSHEET_APP_UI_FONT` overrides it, which is handy when comparing fonts
+/// during QA.
+fn ui_font() -> String {
+    // macOS and Windows are the only supported desktops.
+    let family = if cfg!(target_os = "macos") {
+        // The hidden family name of San Francisco. It resolves through the platform font
+        // database, where "San Francisco" and "SF Pro" don't.
+        ".SF NS"
+    } else {
+        "Segoe UI"
+    };
+    // A set-but-empty override would otherwise mean "no family", silently putting the renderer
+    // default back; only a non-empty value counts.
+    std::env::var("SPREADSHEET_APP_UI_FONT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| family.to_string())
+}
+
 fn run_ui() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
+    ui.set_ui_font(ui_font().into());
     let state: Shared = Arc::new(Mutex::new(AppState::default()));
 
     ui.on_load_file({
