@@ -6,7 +6,7 @@
 //! lives in `sheet-core`, and all application behaviour in `state`.
 
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
@@ -662,7 +662,7 @@ fn export_result(weak: &Weak<MainWindow>, state: &Shared) {
     });
 }
 
-fn write_csv(path: &PathBuf, table: &CsvTable) -> Result<(), String> {
+fn write_csv(path: &Path, table: &CsvTable) -> Result<(), String> {
     let file =
         File::create(path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
     sheet_core::write_csv(file, table)

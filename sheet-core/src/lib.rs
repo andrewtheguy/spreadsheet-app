@@ -802,6 +802,17 @@ pub fn compare(
     }
 }
 
+/// The label for a comparison status. Shared so an exported CSV and the on-screen table can't
+/// drift apart; [`comparison_to_table`] and the UI's renderer both use it.
+pub fn status_label(status: ComparisonStatus) -> &'static str {
+    match status {
+        ComparisonStatus::Matched => "Matched",
+        ComparisonStatus::Diff => "Diff",
+        ComparisonStatus::OnlyLeft => "Only Left",
+        ComparisonStatus::OnlyRight => "Only Right",
+    }
+}
+
 /// Renders a [`ComparisonResult`] as a four-column table (key, left value, right value,
 /// status label) so it can be exported via [`write_csv`].
 pub fn comparison_to_table(result: &ComparisonResult) -> CsvTable {
@@ -815,18 +826,11 @@ pub fn comparison_to_table(result: &ComparisonResult) -> CsvTable {
         .rows
         .iter()
         .map(|row| {
-            // Labels mirror the ones the UI renders, so an exported CSV matches the screen.
-            let status = match row.status {
-                ComparisonStatus::Matched => "Matched",
-                ComparisonStatus::Diff => "Diff",
-                ComparisonStatus::OnlyLeft => "Only Left",
-                ComparisonStatus::OnlyRight => "Only Right",
-            };
             vec![
                 row.key.clone(),
                 row.left_value.clone().unwrap_or_default(),
                 row.right_value.clone().unwrap_or_default(),
-                status.to_owned(),
+                status_label(row.status).to_owned(),
             ]
         })
         .collect();
@@ -910,25 +914,32 @@ pub fn sort_comparison(
     column: usize,
     ascending: bool,
 ) -> ComparisonResult {
-    let mut rows = result.rows.clone();
-    let value = |row: &ComparisonRow| -> String {
-        match column {
+    let rows = result.rows.clone();
+    // Each row's cell in the sorted column, extracted once. Comparing through a closure that
+    // cloned the cell on every call would allocate O(n log n) strings instead of O(n).
+    let column_values: Vec<String> = rows
+        .iter()
+        .map(|row| match column {
             0 => row.key.clone(),
             1 => row.left_value.clone().unwrap_or_default(),
             2 => row.right_value.clone().unwrap_or_default(),
             _ => String::new(),
-        }
-    };
-    let column_values: Vec<String> = rows.iter().map(&value).collect();
+        })
+        .collect();
     let numeric = column <= 2 && column_is_numeric(column_values.iter().map(String::as_str));
-    rows.sort_by(|a, b| {
+
+    // Sort the (key, row) pairs so each comparison just borrows its precomputed key. `sort_by`
+    // is stable, so equal cells keep their original relative order as before.
+    let mut paired: Vec<(String, ComparisonRow)> = column_values.into_iter().zip(rows).collect();
+    paired.sort_by(|(a_value, a), (b_value, b)| {
         let ord = if column == 3 {
             status_rank(a.status).cmp(&status_rank(b.status))
         } else {
-            compare_cells(&value(a), &value(b), numeric)
+            compare_cells(a_value, b_value, numeric)
         };
         if ascending { ord } else { ord.reverse() }
     });
+    let rows: Vec<ComparisonRow> = paired.into_iter().map(|(_, row)| row).collect();
     ComparisonResult {
         rows,
         key_column: result.key_column.clone(),
@@ -1027,6 +1038,7 @@ mod sort_tests {
             },
         }
     }
+
 
     #[test]
     fn sorts_comparison_by_key() {
@@ -1357,6 +1369,46 @@ mod tests {
         let right = table(&["id"], &[&["B"]]);
         let result = filter_rows(&left, &right, "id", &opts(FilterMode::Include, false));
         assert_eq!(result.rows, rows(&[&["B", "first"], &["B", "second"]]));
+    }
+
+
+    #[test]
+    fn column_missing_in_left_never_matches() {
+        // `filter_rows` resolves the column per table, so a left table that lacks it has no
+        // value to test: nothing matches, which Exclude and Include read opposite ways.
+        let left = table(&["other"], &[&["A"], &["B"]]);
+        let right = table(&["id"], &[&["A"]]);
+        let excluded = filter_rows(&left, &right, "id", &opts(FilterMode::Exclude, false));
+        assert_eq!(excluded.rows, left.rows, "Exclude keeps every row");
+        let included = filter_rows(&left, &right, "id", &opts(FilterMode::Include, false));
+        assert!(included.rows.is_empty(), "Include keeps none: {:?}", included.rows);
+        // Either way the shape is left's.
+        assert_eq!(included.headers, left.headers);
+    }
+
+    #[test]
+    fn compare_collapses_a_table_without_the_key_column() {
+        // Every row normalizes to the same MISSING_KEY sentinel, so the whole side collapses to
+        // one row (last occurrence wins) rather than pairing up row-by-row.
+        let no_key = table(&["other", "v"], &[&["x", "1"], &["y", "2"]]);
+        let with_key = table(&["id", "v"], &[&["A", "1"]]);
+        let result = compare(&no_key, &with_key, "id", "v", false);
+
+        assert_eq!(result.rows.len(), 2);
+        let collapsed = &result.rows[0];
+        assert_eq!(collapsed.status, ComparisonStatus::OnlyLeft);
+        // The sentinel is never shown; it displays as an empty key.
+        assert_eq!(collapsed.key, "");
+        assert_eq!(collapsed.left_value.as_deref(), Some("2"));
+        assert_eq!(collapsed.right_value, None);
+        // The right table still contributes its own key normally.
+        assert_eq!(result.rows[1].key, "A");
+        assert_eq!(result.rows[1].status, ComparisonStatus::OnlyRight);
+
+        assert_eq!(result.summary.total, 2);
+        assert_eq!(result.summary.only_left, 1);
+        assert_eq!(result.summary.only_right, 1);
+        assert_eq!(result.summary.matched, 0);
     }
 
     // --- common_columns / compare ---

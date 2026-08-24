@@ -204,16 +204,6 @@ pub fn table_view(preview: &TablePreview, sort: Option<SortState>) -> TableView 
     )
 }
 
-/// The label shown in the Status column for each comparison outcome.
-fn status_label(status: ComparisonStatus) -> &'static str {
-    match status {
-        ComparisonStatus::Matched => "Matched",
-        ComparisonStatus::Diff => "Diff",
-        ComparisonStatus::OnlyLeft => "Only Left",
-        ComparisonStatus::OnlyRight => "Only Right",
-    }
-}
-
 /// Renders a comparison preview as a four-column table: key, left value, right value, status.
 /// Column indices here are what `sheet_core::sort_comparison` expects, so a header click maps
 /// straight through.
@@ -232,7 +222,7 @@ pub fn comparison_view(preview: &ComparisonPreview, sort: Option<SortState>) -> 
                 row.key.clone(),
                 row.left_value.clone().unwrap_or_default(),
                 row.right_value.clone().unwrap_or_default(),
-                status_label(row.status).to_string(),
+                sheet_core::status_label(row.status).to_string(),
             ],
             tint: match row.status {
                 ComparisonStatus::Matched => RowTint::None,
