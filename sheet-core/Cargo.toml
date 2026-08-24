@@ -19,4 +19,4 @@ zip = { version = "7", default-features = false, features = ["deflate"] }
 quick-xml = "0.39"
 
 [dev-dependencies]
-rust_xlsxwriter = "0.95.0"
+rust_xlsxwriter = "0.98.2"
