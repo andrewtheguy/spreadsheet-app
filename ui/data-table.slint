@@ -92,6 +92,7 @@ component DataTableRow inherits Rectangle {
     in property <RowTint> tint;
 
     // A status tint wins over the zebra striping; untinted rows alternate for readability.
+    // Cell selection is painted by the cells themselves, on top of this.
     background: root.tint == RowTint.diff ? Theme.tint-diff
         : root.tint == RowTint.only-left ? Theme.tint-only-left
         : root.tint == RowTint.only-right ? Theme.tint-only-right
@@ -111,8 +112,17 @@ component DataTableRow inherits Rectangle {
 export component DataTable {
     in-out property <[TableColumn]> columns;
     in property <[DataRow]> rows;
+    // The selected cell rectangle in display row/column indices, all bounds inclusive and
+    // already ordered; -1 means no selection (in this table — at most one of the app's tables
+    // has one at a time).
+    in property <int> selection-start-row: -1;
+    in property <int> selection-end-row: -1;
+    in property <int> selection-start-column: -1;
+    in property <int> selection-end-column: -1;
 
     callback header-clicked(column: int);
+    // `extend` is true for a shift-click, which grows the selection instead of replacing it.
+    callback cell-clicked(row: int, column: int, extend: bool);
 
     horizontal-stretch: 1;
     vertical-stretch: 1;
@@ -157,8 +167,17 @@ export component DataTable {
                 even: mod(index, 2) == 0;
                 tint: row.tint;
 
-                for cell[column] in row.cells: Rectangle {
+                for cell[column] in row.cells: cell-rect := Rectangle {
+                    property <bool> selected: root.selection-start-row >= 0
+                        && index >= root.selection-start-row
+                        && index <= root.selection-end-row
+                        && column >= root.selection-start-column
+                        && column <= root.selection-end-column;
+
                     clip: true;
+                    // Selection wins over the row's tint/zebra background (its foreground
+                    // swaps too, so a tint would clash with it).
+                    background: self.selected ? Palette.selection-background : transparent;
                     horizontal-stretch: root.columns[column].horizontal-stretch;
                     min-width: max(root.columns[column].min-width, root.columns[column].width);
                     preferred-width: self.min-width;
@@ -166,13 +185,23 @@ export component DataTable {
                         ? max(root.columns[column].min-width, root.columns[column].width)
                         : 100000px;
 
+                    // On `down` rather than `clicked` so selecting feels immediate, and via
+                    // `pointer-event` because plain `clicked` doesn't expose shift.
+                    TouchArea {
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                root.cell-clicked(index, column, event.modifiers.shift);
+                            }
+                        }
+                    }
+
                     HorizontalLayout {
                         padding-left: 8px;
                         padding-right: 8px;
 
                         Text {
                             text: cell;
-                            color: Palette.foreground;
+                            color: cell-rect.selected ? Palette.selection-foreground : Palette.foreground;
                             vertical-alignment: center;
                             overflow: elide;
                         }

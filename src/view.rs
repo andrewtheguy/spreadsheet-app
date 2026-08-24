@@ -4,7 +4,7 @@
 
 use sheet_core::{ComparisonPreview, ComparisonStatus, TablePreview};
 
-use crate::state::{AppState, OperationMode, SortState};
+use crate::state::{AppState, OperationMode, Side, SortState, TableTarget};
 
 /// A column header as rendered: its label, its sort indicator, and how wide it wants to be.
 pub struct ColumnView {
@@ -235,6 +235,127 @@ pub fn comparison_view(preview: &ComparisonPreview, sort: Option<SortState>) -> 
     build(titles, rows, sort, preview.total_rows)
 }
 
+/// The view rendered for `target` right now, if it has a table. This is the same construction
+/// the UI paints from, so display-row indices coming back from clicks line up with the rows the
+/// copy functions below extract.
+pub fn target_view(state: &AppState, target: TableTarget) -> Option<TableView> {
+    match target {
+        TableTarget::Panel(side) => {
+            let panel = state.panel(side);
+            panel
+                .display()
+                .map(|preview| table_view(preview, panel.sort()))
+        }
+        TableTarget::Result => match state.mode() {
+            OperationMode::Filter => state
+                .filtered()
+                .map(|preview| table_view(preview, state.filtered_sort())),
+            OperationMode::Compare => state
+                .comparison()
+                .map(|preview| comparison_view(preview, state.comparison_sort())),
+        },
+    }
+}
+
+/// How many rows and columns `target` actually displays (blank rows dropped, preview capped)
+/// — the space cell selections live in.
+pub fn display_size(state: &AppState, target: TableTarget) -> (usize, usize) {
+    target_view(state, target).map_or((0, 0), |table| (table.rows.len(), table.columns.len()))
+}
+
+/// The table Copy Table and the keyboard-selection actions fall back to when nothing is
+/// selected: the result when it's showing, else the first panel that displays rows. Without
+/// this, loading a single file would leave every keyboard selection action a silent no-op.
+pub fn default_copy_target(state: &AppState) -> Option<TableTarget> {
+    [
+        TableTarget::Result,
+        TableTarget::Panel(Side::Left),
+        TableTarget::Panel(Side::Right),
+    ]
+    .into_iter()
+    .find(|target| display_size(state, *target).0 > 0)
+}
+
+/// A cell as clipboard text. Cells containing a tab, newline, or quote are quoted the way Excel
+/// quotes them on the clipboard, so pasting reproduces the cell instead of splitting the grid.
+fn tsv_cell(cell: &str) -> String {
+    if cell.contains(['\t', '\n', '\r', '"']) {
+        format!("\"{}\"", cell.replace('"', "\"\""))
+    } else {
+        cell.to_string()
+    }
+}
+
+/// Rows as tab-separated lines, the format both Excel and Numbers paste as a grid.
+fn tsv<'a>(rows: impl Iterator<Item = &'a [String]>) -> String {
+    rows.map(|row| {
+        row.iter()
+            .map(|cell| tsv_cell(cell))
+            .collect::<Vec<_>>()
+            .join("\t")
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// "1 row" / "48,120 rows" — the status-strip label for a row-shaped copy.
+fn rows_label(count: usize) -> String {
+    if count == 1 {
+        "1 row".to_string()
+    } else {
+        format!("{} rows", thousands(count))
+    }
+}
+
+/// The selected cells as tab-separated text, plus a status-strip label: "1 cell" for a single
+/// cell, "N rows" when the selection spans every column, "N cells" for a narrower rectangle.
+/// `None` when nothing is selected or the selection no longer intersects its table.
+pub fn selection_tsv(state: &AppState) -> Option<(String, String)> {
+    let selection = state.selection()?;
+    let table = target_view(state, selection.target)?;
+    let (first_row, last_row) = selection.row_bounds();
+    let last_row = last_row.min(table.rows.len().checked_sub(1)?);
+    let (first_column, last_column) = selection.column_bounds();
+    let last_column = last_column.min(table.columns.len().checked_sub(1)?);
+    if first_row > last_row || first_column > last_column {
+        return None;
+    }
+
+    // Sliced per row because CSV rows can be ragged; a row shorter than the selection just
+    // contributes the cells it has.
+    let text = tsv(table.rows[first_row..=last_row].iter().map(|row| {
+        let end = (last_column + 1).min(row.cells.len());
+        &row.cells[first_column.min(end)..end]
+    }));
+    let rows = last_row - first_row + 1;
+    let cells = rows * (last_column - first_column + 1);
+    let label = if cells == 1 {
+        "1 cell".to_string()
+    } else if (first_column, last_column) == (0, table.columns.len() - 1) {
+        rows_label(rows)
+    } else {
+        format!("{} cells", thousands(cells))
+    };
+    Some((text, label))
+}
+
+/// The whole displayed table for `target` as tab-separated text, headers first, plus the
+/// status-strip label for its row count (headers not counted).
+pub fn table_tsv(state: &AppState, target: TableTarget) -> Option<(String, String)> {
+    let table = target_view(state, target)?;
+    let headers: Vec<String> = table
+        .columns
+        .iter()
+        .map(|column| column.title.clone())
+        .collect();
+    let label = rows_label(table.rows.len());
+    let text = tsv(
+        std::iter::once(headers.as_slice())
+            .chain(table.rows.iter().map(|row| row.cells.as_slice())),
+    );
+    Some((text, label))
+}
+
 /// The italic placeholder shown where the result table would be, explaining what's still needed.
 pub fn result_hint(state: &AppState) -> &'static str {
     let both_loaded =
@@ -350,6 +471,131 @@ mod tests {
         assert_eq!(view.rows.len(), 2);
         // The blank row is gone from the display but the count still reflects the real data.
         assert_eq!(view.status, "Showing 2 of 3 rows");
+    }
+
+    #[test]
+    fn tsv_quotes_cells_that_would_break_the_grid() {
+        assert_eq!(tsv_cell("plain"), "plain");
+        assert_eq!(tsv_cell("a\tb"), "\"a\tb\"");
+        assert_eq!(tsv_cell("two\nlines"), "\"two\nlines\"");
+        assert_eq!(tsv_cell("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    fn csv(headers: &[&str], rows: &[&[&str]]) -> sheet_core::CsvTable {
+        sheet_core::CsvTable {
+            headers: headers.iter().map(|h| h.to_string()).collect(),
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|c| c.to_string()).collect())
+                .collect(),
+        }
+    }
+
+    fn app_with_left(rows: &[&[&str]]) -> AppState {
+        let mut app = AppState::default();
+        app.set_table(
+            crate::state::Side::Left,
+            csv(&["sku", "qty"], rows),
+            "/tmp/left.csv".into(),
+        );
+        app
+    }
+
+    const LEFT: TableTarget = TableTarget::Panel(crate::state::Side::Left);
+
+    #[test]
+    fn selection_tsv_extracts_the_selected_rectangle() {
+        let mut app = app_with_left(&[&["a", "1"], &["b", "2"], &["c", "3"]]);
+
+        // A single cell.
+        app.select_cell(LEFT, 1, 1, false);
+        let (text, label) = selection_tsv(&app).expect("cell");
+        assert_eq!(text, "2");
+        assert_eq!(label, "1 cell");
+
+        // Extended to a full-width range, which reads as rows.
+        app.select_cell(LEFT, 2, 0, true);
+        let (text, label) = selection_tsv(&app).expect("rows");
+        assert_eq!(text, "b\t2\nc\t3");
+        assert_eq!(label, "2 rows");
+
+        // A single-column rectangle stays cell-labelled.
+        app.select_cell(LEFT, 0, 0, false);
+        app.select_cell(LEFT, 1, 0, true);
+        let (text, label) = selection_tsv(&app).expect("column");
+        assert_eq!(text, "a\nb");
+        assert_eq!(label, "2 cells");
+    }
+
+    #[test]
+    fn selection_rows_are_display_rows_not_data_rows() {
+        // The blank data row is hidden, so display row 1 is the *third* data row.
+        let mut app = app_with_left(&[&["a", "1"], &["", "  "], &["c", "3"]]);
+        app.select_cell(LEFT, 1, 0, false);
+        app.select_cell(LEFT, 1, 1, true);
+        let (text, label) = selection_tsv(&app).expect("selection");
+        assert_eq!(label, "1 row");
+        assert_eq!(text, "c\t3");
+    }
+
+    #[test]
+    fn a_selection_past_the_table_copies_nothing() {
+        let mut app = app_with_left(&[&["a", "1"]]);
+        app.select_cell(LEFT, 5, 0, false);
+        assert!(selection_tsv(&app).is_none());
+    }
+
+    #[test]
+    fn a_selection_wider_than_the_table_clamps_to_it() {
+        let mut app = app_with_left(&[&["a", "1"], &["b", "2"]]);
+        app.select_cell(LEFT, 0, 1, false);
+        app.select_cell(LEFT, 1, 9, true);
+        let (text, label) = selection_tsv(&app).expect("selection");
+        assert_eq!(text, "1\n2");
+        assert_eq!(label, "2 cells");
+    }
+
+    #[test]
+    fn table_tsv_leads_with_headers() {
+        let app = app_with_left(&[&["a", "1"], &["b", "2"]]);
+        let (text, label) = table_tsv(&app, LEFT).expect("table");
+        assert_eq!(label, "2 rows");
+        assert_eq!(text, "sku\tqty\na\t1\nb\t2");
+    }
+
+    #[test]
+    fn copy_falls_back_to_the_result_then_the_loaded_panels() {
+        let mut app = AppState::default();
+        assert_eq!(default_copy_target(&app), None);
+
+        app.set_table(
+            crate::state::Side::Right,
+            csv(&["sku", "region"], &[&["b", "EU"]]),
+            "/tmp/right.csv".into(),
+        );
+        assert_eq!(
+            default_copy_target(&app),
+            Some(TableTarget::Panel(crate::state::Side::Right))
+        );
+
+        app.set_table(
+            crate::state::Side::Left,
+            csv(&["sku", "qty"], &[&["a", "1"], &["b", "2"]]),
+            "/tmp/left.csv".into(),
+        );
+        assert_eq!(default_copy_target(&app), Some(LEFT));
+
+        // Once a (non-empty) result is showing, it wins.
+        app.set_filter_column(Some(0));
+        assert_eq!(default_copy_target(&app), Some(TableTarget::Result));
+    }
+
+    #[test]
+    fn copying_an_unloaded_table_yields_nothing() {
+        let app = AppState::default();
+        assert!(table_tsv(&app, TableTarget::Result).is_none());
+        assert!(selection_tsv(&app).is_none());
+        assert_eq!(display_size(&app, LEFT), (0, 0));
     }
 
     #[test]
