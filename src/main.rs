@@ -7,6 +7,7 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use sheet_core::CsvTable;
@@ -40,7 +41,45 @@ const MIN_COLUMN_WIDTH: f32 = 56.0;
 /// How much of a source path to show under a panel title before middle-truncating it.
 const PATH_CHARS: usize = 60;
 
-fn main() -> Result<(), slint::PlatformError> {
+/// Set on the child process when we relaunch with the software renderer, so a machine that
+/// can't start either renderer fails once instead of forking forever.
+const SOFTWARE_RENDERER_ENV: &str = "SPREADSHEET_APP_SOFTWARE_RENDERER";
+
+fn main() -> ExitCode {
+    let Err(error) = run_ui() else {
+        return ExitCode::SUCCESS;
+    };
+
+    // Slint's default renderer needs an OpenGL 3 driver, and plenty of real Windows sessions
+    // don't have one — RDP, VMs and servers among them, where it dies with "Failed to
+    // initialize OpenGL driver". The failure only surfaces once the window is shown, by which
+    // point Slint's platform is set process-globally and can't be swapped, so falling back to
+    // the software renderer means a fresh process rather than a retry inside this one.
+    if std::env::var_os(SOFTWARE_RENDERER_ENV).is_none() {
+        if let Some(code) = relaunch_with_software_renderer() {
+            return code;
+        }
+    }
+
+    eprintln!("{error}");
+    ExitCode::FAILURE
+}
+
+/// Relaunches this executable with Slint pinned to its software renderer, returning the child's
+/// exit code — or `None` when the child couldn't be spawned or failed as well, so the caller
+/// reports the original error instead of hiding it behind a second one.
+fn relaunch_with_software_renderer() -> Option<ExitCode> {
+    let exe = std::env::current_exe().ok()?;
+    let status = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env(SOFTWARE_RENDERER_ENV, "1")
+        .env("SLINT_BACKEND", "winit-software")
+        .status()
+        .ok()?;
+    status.success().then_some(ExitCode::SUCCESS)
+}
+
+fn run_ui() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
     let state: Shared = Arc::new(Mutex::new(AppState::default()));
 

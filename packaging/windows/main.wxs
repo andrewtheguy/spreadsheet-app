@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v3 source for the Windows MSI. Tauri used to generate this; with the Slint rewrite the
+  installer is defined here and built by scripts/bundle-windows.ps1.
+
+  Two variables are passed in with `candle -d`:
+    Version  the crate version, which becomes the MSI ProductVersion
+    ExePath  the release binary to package
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="spreadsheet-app"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="andrewtheguy"
+           UpgradeCode="3CAE69D3-A447-46C4-9F87-A83668D544B4">
+
+    <Package InstallerVersion="450"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Manufacturer="andrewtheguy"
+             Description="CSV / Excel Filter and Compare" />
+
+    <!-- `Product/@Id="*"` regenerates the ProductCode every build; the fixed UpgradeCode above
+         is what ties those builds together, so this uninstalls the previous version instead of
+         installing alongside it. Never change the UpgradeCode. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of spreadsheet-app is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <!-- The directory the InstallDir dialog lets the user change. -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="spreadsheet-app" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*" Win64="yes">
+        <File Id="AppExe" Name="spreadsheet-app.exe" Source="$(var.ExePath)" KeyPath="yes">
+          <!-- Slashes are illegal in a .lnk filename, so the Start Menu entry spells the name
+               out rather than reusing the window title. -->
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="CSV Excel Filter and Compare"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="AppIcon.ico"
+                    Advertise="yes" />
+        </File>
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="spreadsheet-app" Level="1">
+      <ComponentRef Id="MainExecutable" />
+    </Feature>
+
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+      <!-- Skip the licence dialog: the project ships no licence text, and WixUI_InstallDir
+           would otherwise demand a placeholder RTF and make users accept it. These two
+           publishes rewire Welcome → InstallDir directly, in both directions. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2">1</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">1</Publish>
+    </UI>
+  </Product>
+</Wix>

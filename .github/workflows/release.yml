@@ -88,9 +88,11 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release --target x86_64-pc-windows-msvc
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Force `
-            -Path target/x86_64-pc-windows-msvc/release/spreadsheet-app.exe `
+          $exe = "target/x86_64-pc-windows-msvc/release/spreadsheet-app.exe"
+          # MSI installer (Start Menu entry, Add/Remove Programs, in-place upgrades).
+          ./scripts/bundle-windows.ps1 -ExePath $exe -OutDir dist
+          # Plus the bare .exe, for anyone who'd rather not run an installer.
+          Compress-Archive -Force -Path $exe `
             -DestinationPath dist/spreadsheet-app-windows-x86_64.zip
 
       - name: Upload artifacts to the draft release
@@ -112,7 +114,7 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             for f in target/macos/*.dmg target/macos/*.zip; do upload "$f"; done
           else
-            for f in dist/*.zip; do upload "$f"; done
+            for f in dist/*.msi dist/*.zip; do upload "$f"; done
           fi
 
   publish:

@@ -111,10 +111,31 @@ cargo build --release
 MAKE_DMG=1 ./scripts/bundle-macos.sh target/macos target/release/spreadsheet-app
 ```
 
-The `release` workflow does the same for both macOS architectures and uploads a
-`.dmg` plus a zipped `.app`; Windows gets a zipped `.exe`. Note that the Windows
-**MSI installer** the old Tauri bundler produced is *not* reproduced — adding one
-would mean wiring up `cargo-wix` or similar.
+Windows gets an MSI from `scripts/bundle-windows.ps1`, which downloads a pinned
+WiX v3 and compiles `packaging/windows/main.wxs`:
+
+```powershell
+cargo build --release
+pwsh scripts/bundle-windows.ps1 -ExePath target/release/spreadsheet-app.exe
+```
+
+The installer is per-machine, puts the app in `%ProgramFiles%\spreadsheet-app`
+with a Start Menu shortcut, and upgrades in place. **Never change the
+`UpgradeCode` GUID in `main.wxs`** — it's what ties builds together as upgrades
+rather than parallel installs.
+
+The `release` workflow runs both, uploading a `.dmg` plus a zipped `.app`, and an
+`.msi` plus a zipped `.exe`. Nothing is code-signed, so both platforms show an
+unidentified-developer warning.
+
+### Rendering fallback
+
+Slint's default renderer needs an OpenGL 3 driver. Some real Windows sessions
+don't have one (RDP, VMs, Windows Server), where it dies with "Failed to
+initialize OpenGL driver". Because Slint's platform is process-global by the time
+that surfaces, `main.rs` handles it by relaunching itself once with
+`SLINT_BACKEND=winit-software`. On the fallback path you'll see two processes:
+a thin parent waiting on the child that owns the window.
 
 ## Recommended IDE Setup
 

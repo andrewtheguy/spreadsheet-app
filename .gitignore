@@ -5,6 +5,9 @@ logs
 # Rust build output
 target/
 
+# WiX toolset, downloaded on demand by scripts/bundle-windows.ps1
+.wix/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
