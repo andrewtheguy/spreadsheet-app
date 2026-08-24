@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "sheet-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "calamine",
  "csv",
@@ -4750,7 +4750,7 @@ dependencies = [
 
 [[package]]
 name = "spreadsheet-app"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "arboard",
  "rfd",
