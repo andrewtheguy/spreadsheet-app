@@ -1,0 +1,36 @@
+[package]
+name = "spreadsheet-app"
+version = "0.0.4"
+description = "Filter and compare two spreadsheets (CSV or Excel) by a shared column"
+authors = ["Andrew Chen"]
+edition = "2021"
+
+[[bin]]
+name = "spreadsheet-app"
+path = "src/main.rs"
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[dependencies]
+# Native Slint UI. The default features give the winit backend plus the FemtoVG (OpenGL) and
+# software renderers, which cover macOS and Windows without any system webview.
+slint = "1.17.1"
+# Pure CSV/Excel parsing, filtering, comparing, and sorting. UI-agnostic, so the Slint layer
+# is a thin shell over it — the same core drove the previous webview frontend unchanged.
+sheet-core = { path = "sheet-core" }
+# Standalone native file dialogs. Default features are Linux-only portal/async support, which
+# this macOS/Windows app does not need.
+rfd = { version = "0.15", default-features = false }
+
+# The repo root is the workspace root; `sheet-core` is its only extra member.
+[workspace]
+members = ["sheet-core"]
+resolver = "2"
+
+[profile.release]
+# A native GUI binary ships the whole dependency tree; LTO plus a single codegen unit keeps it
+# from ballooning and speeds up the render loop.
+lto = true
+codegen-units = 1
+strip = true

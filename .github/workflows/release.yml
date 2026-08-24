@@ -35,7 +35,7 @@ jobs:
           # Create via the API so the response gives us the numeric release id directly.
           # A draft release has no git tag yet, so it can't be looked up via
           # `releases/tags/{tag}` (that endpoint only matches published releases).
-          # tauri-action uploads by that numeric id.
+          # The upload step below addresses it by that numeric id.
           RELEASE_ID=$(gh api -X POST "repos/$GH_REPO/releases" \
             -f tag_name="${{ steps.meta.outputs.tag }}" \
             -f target_commitish="$GITHUB_SHA" \
@@ -55,35 +55,65 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            # DMG only. The standalone `app` bundle is uploaded as `.app.tar.gz`.
-            args: '--bundles dmg'
+            # Universal binary, so one .dmg covers Apple silicon and Intel.
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
           - platform: windows-latest
-            # Only build the MSI installer (overrides `targets: "all"` in tauri.conf.json).
-            args: '--bundles msi'
+            targets: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: setup bun
-        uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
 
       - name: rust cache
         uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
 
-      - name: install frontend dependencies
-        run: bun install
+      - name: Build (macOS, universal)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          MAKE_DMG=1 ./scripts/bundle-macos.sh target/macos \
+            target/aarch64-apple-darwin/release/spreadsheet-app \
+            target/x86_64-apple-darwin/release/spreadsheet-app
+          # Ship the .app too, so the DMG isn't the only way to get it.
+          ditto -c -k --keepParent target/macos/spreadsheet-app.app \
+            target/macos/spreadsheet-app-macos.zip
 
-      # Builds the CEF Tauri app via the cli-cef CLI (the `tauri` script) and
-      # uploads the bundles to the draft prerelease created above.
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          tauriScript: bun run tauri
-          args: ${{ matrix.args }}
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Force `
+            -Path target/x86_64-pc-windows-msvc/release/spreadsheet-app.exe `
+            -DestinationPath dist/spreadsheet-app-windows-x86_64.zip
+
+      - name: Upload artifacts to the draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `gh release upload` addresses releases by tag, which a draft doesn't have yet, so
+          # upload against the numeric release id instead.
+          upload() {
+            local file=$1
+            echo "Uploading $(basename "$file")"
+            curl --fail-with-body -sSL -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/$GH_REPO/releases/${{ needs.create-release.outputs.release_id }}/assets?name=$(basename "$file")" \
+              > /dev/null
+          }
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            for f in target/macos/*.dmg target/macos/*.zip; do upload "$f"; done
+          else
+            for f in dist/*.zip; do upload "$f"; done
+          fi
 
   publish:
     name: Publish prerelease

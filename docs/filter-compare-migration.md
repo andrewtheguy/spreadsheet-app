@@ -1,5 +1,11 @@
 # Filter / Compare migration roadmap
 
+> **Historical.** This roadmap was completed in 2026-05 against the Tauri +
+> React + Mantine stack, and its file paths (`src-tauri/`, `src/App.tsx`) and UI
+> references no longer exist — the app has since moved to a native Slint front
+> end. The `sheet-core` design decisions it records are still accurate and still
+> in force. See the README for the current architecture.
+
 Migrate the **Filter** and **Compare** operations from
 [`csv-filter`](../../csv-filter) (Electron + MUI) into this app
 (Tauri + React + Mantine), implementing the logic in the Rust `sheet-core`

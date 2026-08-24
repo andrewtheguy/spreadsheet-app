@@ -1,6 +1,6 @@
-//! Pure spreadsheet logic — CSV parsing, serializing, and row matching — extracted from
-//! the Tauri app so it carries no CEF/dialog dependencies and can be unit-tested in
-//! isolation.
+//! Pure spreadsheet logic — CSV parsing, serializing, and row matching — with no UI, dialog,
+//! or filesystem-dialog dependencies, so it can be unit-tested in isolation and reused from
+//! any front end. The app currently drives it from Slint; nothing here knows that.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -9,7 +9,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use quick_xml::events::{BytesStart, Event};
 
-/// A CSV file parsed into a header row plus data rows. Held in the backend store and used by
+/// A CSV file parsed into a header row plus data rows. Held by the app's controller and used by
 /// all the row-matching logic; the UI only ever receives a bounded [`TablePreview`] of it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CsvTable {
@@ -17,13 +17,13 @@ pub struct CsvTable {
     pub rows: Vec<Vec<String>>,
 }
 
-/// Maximum rows shipped to the UI for display. Extremely large tables would otherwise hang the
-/// frontend (the whole payload crosses IPC and lands in JS state) even though the grid only
-/// renders a page at a time. The full table stays server-side for sort/filter/compare/export.
+/// Maximum rows shipped to the UI for display. Building a view model for every row of an
+/// extremely large table would cost far more than anyone can scroll through. The full table
+/// stays with the controller, which is what sort/filter/compare/export actually operate on.
 pub const MAX_PREVIEW_ROWS: usize = 1000;
 
 /// A bounded view of a [`CsvTable`] for the UI: the first [`MAX_PREVIEW_ROWS`] rows plus the
-/// true total, so the frontend renders quickly and can still show "first 1,000 of N rows".
+/// true total, so the UI renders quickly and can still show "first 1,000 of N rows".
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePreview {
@@ -73,7 +73,7 @@ impl ComparisonPreview {
 
 /// Parses CSV from `reader`, treating the first record as headers. Ragged rows are
 /// accepted and normalized to the header width — short rows are padded with empty strings,
-/// long rows are truncated — so cells stay column-aligned on the frontend.
+/// long rows are truncated — so cells stay column-aligned when rendered.
 ///
 /// Cells are read as raw bytes (via [`csv::ByteRecord`]) so files that aren't valid UTF-8
 /// (e.g. Excel exports in Windows-1252) load instead of failing hard: see [`sanitize_field`].
@@ -565,8 +565,8 @@ pub enum FilterMode {
     Include,
 }
 
-/// Options controlling [`filter_rows`]. `camelCase` on the wire so the frontend can send
-/// `caseInsensitive` (Tauri only auto-converts top-level command args, not nested fields).
+/// Options controlling [`filter_rows`]. The `serde` derives (here and on the types below) are
+/// for callers that need to persist or ship these values; the app itself passes them directly.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterOptions {
@@ -648,8 +648,7 @@ pub enum ComparisonStatus {
 }
 
 /// One key's comparison across the two tables. `left_value`/`right_value` are `None` when
-/// that side lacks the key. `serde` uses camelCase so the field names cross the Tauri
-/// boundary as `leftValue`/`rightValue`.
+/// that side lacks the key.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComparisonRow {
@@ -816,7 +815,7 @@ pub fn comparison_to_table(result: &ComparisonResult) -> CsvTable {
         .rows
         .iter()
         .map(|row| {
-            // Labels mirror the frontend's STATUS_LABEL so the exported CSV matches the UI.
+            // Labels mirror the ones the UI renders, so an exported CSV matches the screen.
             let status = match row.status {
                 ComparisonStatus::Matched => "Matched",
                 ComparisonStatus::Diff => "Diff",

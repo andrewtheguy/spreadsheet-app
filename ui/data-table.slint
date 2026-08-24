@@ -1,0 +1,184 @@
+// Copyright notice: modelled on Slint's own `StandardTableView` (MIT-compatible reference in
+// the crate's `widgets/*/tableview.slint`), reimplemented here because the stock widget renders
+// every row identically — the Compare view needs per-row tinting by comparison status.
+
+import { ListView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Why a row is tinted. Mirrors `sheet_core::ComparisonStatus` as surfaced by `view::RowTint`:
+// the Rust side decides the *meaning*, this file decides the colour.
+export enum RowTint {
+    none,
+    diff,
+    only-left,
+    only-right,
+}
+
+// One rendered row: its already-formatted cells (blank rows are dropped and values stringified
+// in Rust) plus the tint its status earns.
+export struct DataRow {
+    cells: [string],
+    tint: RowTint,
+}
+
+// A column header: clickable to cycle the sort, and draggable on its right edge to resize.
+component HeaderCell inherits Rectangle {
+    in property <string> title;
+    in property <SortOrder> sort-order;
+    // The last column draws no right-hand divider (and so has no resize grip).
+    in property <bool> last;
+
+    callback clicked <=> touch.clicked;
+    callback adjust-size(delta: length);
+
+    clip: true;
+    background: touch.pressed ? Theme.header-pressed : Theme.header-background;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+
+        Text {
+            text: root.title;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+            font-weight: root.sort-order == SortOrder.unsorted ? 400 : 700;
+        }
+
+        // The ▲/▼ indicator, reserving no space when the column is unsorted.
+        Text {
+            text: root.sort-order == SortOrder.ascending ? "▲"
+                : root.sort-order == SortOrder.descending ? "▼" : "";
+            color: Palette.foreground;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+    }
+
+    // Bottom rule, separating the header strip from the rows.
+    Rectangle {
+        y: parent.height - self.height;
+        width: 100%;
+        height: 1px;
+        background: Theme.grid-line;
+    }
+
+    if !root.last: Rectangle {
+        x: parent.width - self.width;
+        width: 1px;
+        background: Theme.grid-line;
+
+        // Sits on top of the 1px divider but is wide enough to actually grab.
+        TouchArea {
+            width: 8px;
+            mouse-cursor: ew-resize;
+            moved => {
+                if self.pressed {
+                    root.adjust-size(self.mouse-x - self.pressed-x);
+                }
+            }
+        }
+    }
+}
+
+component DataTableRow inherits Rectangle {
+    in property <bool> even;
+    in property <RowTint> tint;
+
+    // A status tint wins over the zebra striping; untinted rows alternate for readability.
+    background: root.tint == RowTint.diff ? Theme.tint-diff
+        : root.tint == RowTint.only-left ? Theme.tint-only-left
+        : root.tint == RowTint.only-right ? Theme.tint-only-right
+        : root.even ? Palette.background : Palette.alternate-background;
+
+    min-width: layout.min-width;
+    min-height: max(26px, layout.min-height);
+
+    layout := HorizontalLayout {
+        @children
+    }
+}
+
+// A virtualised, horizontally scrollable table with clickable sort headers and resizable
+// columns. `columns` is `in-out` because the resize grips write back the new width; everything
+// else (contents, sort order) is pushed in from Rust.
+export component DataTable {
+    in-out property <[TableColumn]> columns;
+    in property <[DataRow]> rows;
+
+    callback header-clicked(column: int);
+
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    min-height: 80px;
+    accessible-role: table;
+
+    VerticalLayout {
+        // The header strip is outside the ListView so it stays pinned vertically, but its `x`
+        // tracks the list's viewport so it still scrolls horizontally with the rows.
+        Rectangle {
+            clip: true;
+            vertical-stretch: 0;
+            min-height: max(26px, header.min-height);
+            background: Theme.header-background;
+
+            header := HorizontalLayout {
+                width: max(self.preferred-width, parent.width);
+                x: list.viewport-x;
+
+                for column[index] in root.columns: HeaderCell {
+                    title: column.title;
+                    sort-order: column.sort-order;
+                    last: index == root.columns.length - 1;
+                    horizontal-stretch: column.horizontal-stretch;
+                    min-width: max(column.min-width, column.width);
+                    preferred-width: self.min-width;
+                    max-width: column.width >= 1px ? max(column.min-width, column.width) : 100000px;
+
+                    clicked => {
+                        root.header-clicked(index);
+                    }
+
+                    adjust-size(delta) => {
+                        column.width = max(40px, self.width + delta);
+                    }
+                }
+            }
+        }
+
+        list := ListView {
+            for row[index] in root.rows: DataTableRow {
+                even: mod(index, 2) == 0;
+                tint: row.tint;
+
+                for cell[column] in row.cells: Rectangle {
+                    clip: true;
+                    horizontal-stretch: root.columns[column].horizontal-stretch;
+                    min-width: max(root.columns[column].min-width, root.columns[column].width);
+                    preferred-width: self.min-width;
+                    max-width: root.columns[column].width >= 1px
+                        ? max(root.columns[column].min-width, root.columns[column].width)
+                        : 100000px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: cell;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
