@@ -259,6 +259,10 @@ export component MainWindow inherits Window {
     in property <int> selection-start-column: -1;
     in property <int> selection-end-column: -1;
     in property <bool> can-copy;
+    // Whether Copy Table has a table to act on: the selection's table, else the fallback
+    // target. Computed in Rust so the menu can't enable when the copy would be a no-op
+    // (e.g. a loaded file whose rows are all blank displays no rows).
+    in property <bool> can-copy-table;
 
     // --- Operation panel --------------------------------------------------------------
     in property <OperationMode> mode;
@@ -402,7 +406,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "Copy Table with Headers";
                 shortcut: @keys(Control + Shift + C);
-                enabled: root.can-copy || root.result-has-table || root.left-has-table || root.right-has-table;
+                enabled: root.can-copy-table;
                 activated => {
                     root.copy-table();
                 }

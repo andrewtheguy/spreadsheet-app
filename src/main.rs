@@ -313,8 +313,9 @@ fn run_ui() -> Result<(), slint::PlatformError> {
                 return;
             };
             let copied = view::selection_tsv(&state.lock().unwrap());
-            if let Some((text, label)) = copied {
-                copy_to_clipboard(&ui, text, &label);
+            match copied {
+                Some((text, label)) => copy_to_clipboard(&ui, text, &label),
+                None => notify(&ui, "Nothing to copy", true),
             }
         }
     });
@@ -330,8 +331,9 @@ fn run_ui() -> Result<(), slint::PlatformError> {
                 let app = state.lock().unwrap();
                 selection_or_default(&app).and_then(|target| view::table_tsv(&app, target))
             };
-            if let Some((text, label)) = copied {
-                copy_to_clipboard(&ui, text, &label);
+            match copied {
+                Some((text, label)) => copy_to_clipboard(&ui, text, &label),
+                None => notify(&ui, "Nothing to copy", true),
             }
         }
     });
@@ -506,6 +508,9 @@ fn refresh(ui: &MainWindow, app: &AppState) {
 
     let selection = app.selection();
     ui.set_can_copy(selection.is_some());
+    // Mirrors what `on_copy_table` will actually do, so the menu item can't enable for a
+    // table that displays no rows (where `default_copy_target` would find nothing to copy).
+    ui.set_can_copy_table(selection_or_default(app).is_some());
     match selection {
         Some(selection) => {
             let (first_row, last_row) = selection.row_bounds();
