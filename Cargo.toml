@@ -1,6 +1,6 @@
 [package]
 name = "spreadsheet-app"
-version = "0.0.4"
+version = "0.0.5"
 description = "Filter and compare two spreadsheets (CSV or Excel) by a shared column"
 authors = ["Andrew Chen"]
 edition = "2021"

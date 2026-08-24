@@ -4360,7 +4360,7 @@ dependencies = [
 
 [[package]]
 name = "sheet-core"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "calamine",
  "csv",
@@ -4698,7 +4698,7 @@ dependencies = [
 
 [[package]]
 name = "spreadsheet-app"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "rfd",
  "sheet-core",
