@@ -1,0 +1,994 @@
+import { Button, CheckBox, ComboBox, Palette, ScrollView } from "std-widgets.slint";
+import { DataTable, DataRow, RowTint } from "data-table.slint";
+import { Theme, Panel, Badge } from "theme.slint";
+
+// Re-exported so `slint::include_modules!()` puts them in scope for the Rust glue, which builds
+// the row models directly.
+export { DataRow, RowTint }
+
+// Which of the two source panels an action targets.
+export enum Side {
+    left,
+    right,
+}
+
+// Filter (row matching) vs Compare (VLOOKUP-style diff). Mirrors `state::OperationMode`.
+export enum OperationMode {
+    filter,
+    compare,
+}
+
+// A pair of buttons acting as a segmented control: the active one is drawn as `primary`.
+component SegmentedPair {
+    in property <string> first;
+    in property <string> second;
+    in property <bool> first-active;
+    in property <bool> enabled: true;
+
+    callback picked(first: bool);
+
+    HorizontalLayout {
+        spacing: 4px;
+
+        Button {
+            text: root.first;
+            primary: root.first-active;
+            enabled: root.enabled;
+            clicked => {
+                root.picked(true);
+            }
+        }
+
+        Button {
+            text: root.second;
+            primary: !root.first-active;
+            enabled: root.enabled;
+            clicked => {
+                root.picked(false);
+            }
+        }
+    }
+}
+
+// A labelled dropdown. `model`'s first entry is a placeholder, so index 0 means "nothing
+// picked" — that keeps `current-index` valid at all times without a separate empty state.
+component LabelledCombo {
+    in property <string> label;
+    in property <[string]> model;
+    // Two-way: the ComboBox writes its own `current-index` when the user selects, which would
+    // otherwise replace a one-way binding and stop tracking the Rust state.
+    in-out property <int> current-index;
+    in property <bool> enabled;
+    in property <length> field-width: 200px;
+
+    callback picked(index: int);
+
+    VerticalLayout {
+        spacing: 2px;
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: Theme.dimmed;
+        }
+
+        combo := ComboBox {
+            width: root.field-width;
+            model: root.model;
+            current-index <=> root.current-index;
+            enabled: root.enabled;
+            selected => {
+                root.picked(combo.current-index);
+            }
+        }
+    }
+}
+
+// Shared chrome for the two popovers.
+component Popover inherits Rectangle {
+    background: Palette.background;
+    border-color: Theme.grid-line;
+    border-width: 1px;
+    border-radius: Theme.radius;
+}
+
+// One line of the keyboard-shortcut reference.
+component ShortcutRow {
+    in property <string> keys;
+    in property <string> action;
+
+    HorizontalLayout {
+        spacing: 10px;
+
+        Text {
+            text: root.keys;
+            width: 170px;
+            font-size: 11px;
+            font-weight: 700;
+            color: Palette.foreground;
+        }
+
+        Text {
+            text: root.action;
+            font-size: 11px;
+            color: Theme.dimmed;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+// One of the two source panels: title, source path, load button, and the table itself.
+component TablePanel inherits Panel {
+    in property <string> title;
+    in property <string> path;
+    in property <bool> loading;
+    in property <bool> has-table;
+    in property <string> status;
+    in-out property <[TableColumn]> columns;
+    in property <[DataRow]> rows;
+
+    callback load();
+    callback header-clicked(column: int);
+
+    VerticalLayout {
+        padding: Theme.panel-padding;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: space-between;
+
+            VerticalLayout {
+                alignment: center;
+
+                Text {
+                    text: root.title;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: root.path;
+                    font-size: 11px;
+                    color: Theme.dimmed;
+                    overflow: elide;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+
+                Button {
+                    text: root.loading ? "Loading…" : "Load CSV / Excel";
+                    enabled: !root.loading;
+                    clicked => {
+                        root.load();
+                    }
+                }
+            }
+        }
+
+        if root.has-table: DataTable {
+            columns <=> root.columns;
+            rows: root.rows;
+            header-clicked(column) => {
+                root.header-clicked(column);
+            }
+        }
+
+        if !root.has-table: Text {
+            vertical-stretch: 1;
+            text: "No spreadsheet loaded.";
+            color: Theme.dimmed;
+            font-italic: true;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.status;
+            font-size: 11px;
+            color: Theme.dimmed;
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "CSV / Excel Filter & Compare";
+    icon: @image-url("../icons/128x128@2x.png");
+    preferred-width: 1100px;
+    preferred-height: 760px;
+    min-width: 900px;
+    min-height: 620px;
+
+    // Slint's `font-family` takes one family name and has no fallback list, so the platform's
+    // native UI font is picked in Rust and pushed in here. Without it the renderer falls back to
+    // whatever its font database calls the default sans, which is Helvetica on macOS.
+    in property <string> ui-font;
+    default-font-family: root.ui-font;
+
+    // --- Transient status strip (errors, export confirmations) -------------------------
+    in property <string> message;
+    in property <bool> message-is-error;
+
+    // --- Source panels ----------------------------------------------------------------
+    in property <string> left-path;
+    in property <bool> left-loading;
+    in property <bool> left-has-table;
+    in property <string> left-status;
+    in-out property <[TableColumn]> left-columns;
+    in property <[DataRow]> left-rows;
+
+    in property <string> right-path;
+    in property <bool> right-loading;
+    in property <bool> right-has-table;
+    in property <string> right-status;
+    in-out property <[TableColumn]> right-columns;
+    in property <[DataRow]> right-rows;
+
+    in property <bool> can-swap;
+
+    // --- Operation panel --------------------------------------------------------------
+    in property <OperationMode> mode;
+    // Two-way: the CheckBox and ComboBoxes below write these on interaction, so a one-way
+    // binding would be replaced by the widget's own value and stop tracking the Rust state.
+    in-out property <bool> case-insensitive;
+    in property <bool> exporting;
+    in property <bool> can-export;
+
+    // Filter mode inputs.
+    in property <[string]> filter-columns;
+    in-out property <int> filter-column-index;
+    in property <bool> filter-exclude;
+
+    // Compare mode inputs.
+    in property <[string]> common-columns;
+    in-out property <int> key-column-index;
+    in-out property <int> value-column-index;
+
+    // The result table, shared by both modes — only one is ever on screen.
+    in property <bool> result-has-table;
+    in property <string> result-hint;
+    in property <string> result-status;
+    in-out property <[TableColumn]> result-columns;
+    in property <[DataRow]> result-rows;
+
+    // Compare-only tallies, pre-formatted in Rust.
+    in property <bool> show-summary;
+    in property <string> summary-total;
+    in property <string> summary-matched;
+    in property <string> summary-diff;
+    in property <string> summary-only-left;
+    in property <string> summary-only-right;
+
+    // --- Callbacks into the Rust controller -------------------------------------------
+    callback load-file(side: Side);
+    callback swap-sides();
+    callback sort-panel(side: Side, column: int);
+    callback sort-result(column: int);
+    callback set-mode(mode: OperationMode);
+    callback set-filter-column(index: int);
+    callback set-filter-exclude(exclude: bool);
+    callback set-case-insensitive(value: bool);
+    callback set-key-column(index: int);
+    callback set-value-column(index: int);
+    callback export-result();
+    // Fired once the status strip has been visible long enough to be read.
+    callback clear-message();
+
+    // Keyboard-only equivalents of the mouse interactions above, driven by the menu bar.
+    callback toggle-filter-exclude();
+    callback toggle-case-insensitive();
+    // Steps whichever picker the active mode leads with: the filter column, or the compare
+    // key column. `delta` is +1 for the next entry, -1 for the previous.
+    callback step-primary-column(delta: int);
+    callback step-value-column(delta: int);
+    callback clear-column-selection();
+    callback step-panel-sort(side: Side, delta: int);
+    callback cycle-panel-sort(side: Side);
+    callback step-result-sort(delta: int);
+    callback cycle-result-sort();
+    callback clear-sorts();
+
+    public function show-excel-notes() {
+        excel-notes.show();
+    }
+
+    public function show-shortcuts() {
+        shortcuts.show();
+    }
+
+    // On macOS this becomes the system menu bar; elsewhere Slint renders it in-window. Either
+    // way it's the single source of truth for the app's keyboard shortcuts, so QA (and users)
+    // can reach every action without the mouse. `Control` is ⌘ on macOS and Ctrl elsewhere.
+    MenuBar {
+        Menu {
+            title: "File";
+
+            MenuItem {
+                title: "Load Left…";
+                shortcut: @keys(Control + O);
+                activated => {
+                    root.load-file(Side.left);
+                }
+            }
+
+            MenuItem {
+                title: "Load Right…";
+                shortcut: @keys(Control + Shift + O);
+                activated => {
+                    root.load-file(Side.right);
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Swap Left & Right";
+                shortcut: @keys(Control + T);
+                enabled: root.can-swap;
+                activated => {
+                    root.swap-sides();
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Export Result…";
+                shortcut: @keys(Control + E);
+                enabled: root.can-export && !root.exporting;
+                activated => {
+                    root.export-result();
+                }
+            }
+        }
+
+        Menu {
+            title: "Mode";
+
+            MenuItem {
+                title: "Filter";
+                shortcut: @keys(Control + Digit1);
+                checked: root.mode == OperationMode.filter;
+                activated => {
+                    root.set-mode(OperationMode.filter);
+                }
+            }
+
+            MenuItem {
+                title: "Compare";
+                shortcut: @keys(Control + Digit2);
+                checked: root.mode == OperationMode.compare;
+                activated => {
+                    root.set-mode(OperationMode.compare);
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Exclude Matching Rows";
+                enabled: root.mode == OperationMode.filter;
+                checked: root.filter-exclude;
+                activated => {
+                    root.set-filter-exclude(true);
+                }
+            }
+
+            MenuItem {
+                title: "Include Matching Rows";
+                enabled: root.mode == OperationMode.filter;
+                checked: !root.filter-exclude;
+                activated => {
+                    root.set-filter-exclude(false);
+                }
+            }
+
+            MenuItem {
+                title: "Toggle Exclude / Include";
+                shortcut: @keys(Control + D);
+                enabled: root.mode == OperationMode.filter;
+                activated => {
+                    root.toggle-filter-exclude();
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Case Insensitive";
+                shortcut: @keys(Control + I);
+                checked: root.case-insensitive;
+                activated => {
+                    root.toggle-case-insensitive();
+                }
+            }
+        }
+
+        Menu {
+            title: "Columns";
+
+            MenuItem {
+                title: "Next Column";
+                shortcut: @keys(Control + CloseBracket);
+                activated => {
+                    root.step-primary-column(1);
+                }
+            }
+
+            MenuItem {
+                title: "Previous Column";
+                shortcut: @keys(Control + OpenBracket);
+                activated => {
+                    root.step-primary-column(-1);
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Next Value Column";
+                shortcut: @keys(Control + CloseCurlyBracket);
+                enabled: root.mode == OperationMode.compare;
+                activated => {
+                    root.step-value-column(1);
+                }
+            }
+
+            MenuItem {
+                title: "Previous Value Column";
+                shortcut: @keys(Control + OpenCurlyBracket);
+                enabled: root.mode == OperationMode.compare;
+                activated => {
+                    root.step-value-column(-1);
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Clear Column Selection";
+                shortcut: @keys(Control + Backspace);
+                activated => {
+                    root.clear-column-selection();
+                }
+            }
+        }
+
+        Menu {
+            title: "Sort";
+
+            MenuItem {
+                title: "Result: Next Column";
+                shortcut: @keys(Control + RightArrow);
+                activated => {
+                    root.step-result-sort(1);
+                }
+            }
+
+            MenuItem {
+                title: "Result: Previous Column";
+                shortcut: @keys(Control + LeftArrow);
+                activated => {
+                    root.step-result-sort(-1);
+                }
+            }
+
+            MenuItem {
+                title: "Result: Cycle Direction";
+                shortcut: @keys(Control + DownArrow);
+                activated => {
+                    root.cycle-result-sort();
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Left: Next Column";
+                shortcut: @keys(Alt + RightArrow);
+                enabled: root.left-has-table;
+                activated => {
+                    root.step-panel-sort(Side.left, 1);
+                }
+            }
+
+            MenuItem {
+                title: "Left: Previous Column";
+                shortcut: @keys(Alt + LeftArrow);
+                enabled: root.left-has-table;
+                activated => {
+                    root.step-panel-sort(Side.left, -1);
+                }
+            }
+
+            MenuItem {
+                title: "Left: Cycle Direction";
+                shortcut: @keys(Alt + DownArrow);
+                enabled: root.left-has-table;
+                activated => {
+                    root.cycle-panel-sort(Side.left);
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Right: Next Column";
+                shortcut: @keys(Alt + Shift + RightArrow);
+                enabled: root.right-has-table;
+                activated => {
+                    root.step-panel-sort(Side.right, 1);
+                }
+            }
+
+            MenuItem {
+                title: "Right: Previous Column";
+                shortcut: @keys(Alt + Shift + LeftArrow);
+                enabled: root.right-has-table;
+                activated => {
+                    root.step-panel-sort(Side.right, -1);
+                }
+            }
+
+            MenuItem {
+                title: "Right: Cycle Direction";
+                shortcut: @keys(Alt + Shift + DownArrow);
+                enabled: root.right-has-table;
+                activated => {
+                    root.cycle-panel-sort(Side.right);
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Clear All Sorts";
+                shortcut: @keys(Control + Shift + U);
+                activated => {
+                    root.clear-sorts();
+                }
+            }
+        }
+
+        Menu {
+            title: "Help";
+
+            MenuItem {
+                title: "Excel Notes";
+                shortcut: @keys(Control + K);
+                activated => {
+                    root.show-excel-notes();
+                }
+            }
+
+            MenuItem {
+                title: "Keyboard Shortcuts";
+                shortcut: @keys(Control + Slash);
+                activated => {
+                    root.show-shortcuts();
+                }
+            }
+        }
+    }
+
+    message-timer := Timer {
+        interval: 6s;
+        running: root.message != "";
+        triggered => {
+            root.clear-message();
+        }
+    }
+
+    // Wraps the content so Escape reaches us by bubbling up from whatever has focus. It takes
+    // focus once at startup so the binding works before anything has been clicked, but never
+    // grabs it back afterwards — that would steal focus from the ComboBoxes.
+    escape-scope := FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+
+        init => {
+            escape-scope.focus();
+        }
+
+        KeyBinding {
+            keys: @keys(Escape);
+            activated => {
+                root.clear-message();
+            }
+        }
+
+        VerticalLayout {
+            padding: Theme.gap;
+            spacing: Theme.gap;
+
+            // --- Header ---------------------------------------------------------------
+            HorizontalLayout {
+                spacing: 10px;
+                vertical-stretch: 0;
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Text {
+                        text: "CSV / Excel Filter & Compare";
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Button {
+                        text: "Excel notes";
+                        clicked => {
+                            root.show-excel-notes();
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Button {
+                        text: "Shortcuts";
+                        clicked => {
+                            root.show-shortcuts();
+                        }
+                    }
+                }
+
+                // Pushes the swap button to the far right and hosts the status strip.
+                Rectangle {
+                    horizontal-stretch: 1;
+
+                    if root.message != "": Rectangle {
+                        x: parent.width - self.width;
+                        width: min(parent.width, label.preferred-width + 20px);
+                        height: 26px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 4px;
+                        background: root.message-is-error ? Theme.error-background : Theme.success-background;
+
+                        label := Text {
+                            x: 10px;
+                            width: parent.width - 20px;
+                            height: 100%;
+                            text: root.message;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Button {
+                        text: "Swap Left & Right";
+                        enabled: root.can-swap;
+                        clicked => {
+                            root.swap-sides();
+                        }
+                    }
+                }
+            }
+
+            // --- Source panels --------------------------------------------------------
+            HorizontalLayout {
+                spacing: Theme.gap;
+                vertical-stretch: 1;
+
+                TablePanel {
+                    title: "Left";
+                    path: root.left-path;
+                    loading: root.left-loading;
+                    has-table: root.left-has-table;
+                    status: root.left-status;
+                    columns <=> root.left-columns;
+                    rows: root.left-rows;
+                    load => {
+                        root.load-file(Side.left);
+                    }
+                    header-clicked(column) => {
+                        root.sort-panel(Side.left, column);
+                    }
+                }
+
+                TablePanel {
+                    title: "Right";
+                    path: root.right-path;
+                    loading: root.right-loading;
+                    has-table: root.right-has-table;
+                    status: root.right-status;
+                    columns <=> root.right-columns;
+                    rows: root.right-rows;
+                    load => {
+                        root.load-file(Side.right);
+                    }
+                    header-clicked(column) => {
+                        root.sort-panel(Side.right, column);
+                    }
+                }
+            }
+
+            // --- Operation panel ------------------------------------------------------
+            Panel {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: Theme.panel-padding;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        alignment: start;
+
+                        SegmentedPair {
+                            first: "Filter";
+                            second: "Compare";
+                            first-active: root.mode == OperationMode.filter;
+                            picked(first) => {
+                                root.set-mode(first ? OperationMode.filter : OperationMode.compare);
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            if root.mode == OperationMode.filter: LabelledCombo {
+                                label: "Column (from Right)";
+                                model: root.filter-columns;
+                                current-index <=> root.filter-column-index;
+                                enabled: root.right-has-table;
+                                field-width: 220px;
+                                picked(index) => {
+                                    root.set-filter-column(index);
+                                }
+                            }
+
+                            if root.mode == OperationMode.filter: VerticalLayout {
+                                alignment: end;
+
+                                SegmentedPair {
+                                    first: "Exclude";
+                                    second: "Include";
+                                    first-active: root.filter-exclude;
+                                    picked(first) => {
+                                        root.set-filter-exclude(first);
+                                    }
+                                }
+                            }
+
+                            if root.mode == OperationMode.compare: LabelledCombo {
+                                label: "Key column";
+                                model: root.common-columns;
+                                current-index <=> root.key-column-index;
+                                enabled: root.common-columns.length > 1;
+                                picked(index) => {
+                                    root.set-key-column(index);
+                                }
+                            }
+
+                            if root.mode == OperationMode.compare: LabelledCombo {
+                                label: "Value column";
+                                model: root.common-columns;
+                                current-index <=> root.value-column-index;
+                                enabled: root.common-columns.length > 1;
+                                picked(index) => {
+                                    root.set-value-column(index);
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: end;
+                                padding-bottom: 4px;
+
+                                case-toggle := CheckBox {
+                                    text: "Case insensitive";
+                                    checked <=> root.case-insensitive;
+                                    toggled => {
+                                        root.set-case-insensitive(case-toggle.checked);
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: end;
+
+                            Button {
+                                text: root.exporting ? "Exporting…" : "Export result";
+                                enabled: root.can-export && !root.exporting;
+                                clicked => {
+                                    root.export-result();
+                                }
+                            }
+                        }
+                    }
+
+                    if root.show-summary: HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        Badge {
+                            text: root.summary-total;
+                            tint: Theme.badge-neutral;
+                        }
+
+                        Badge {
+                            text: root.summary-matched;
+                            tint: Theme.badge-matched;
+                        }
+
+                        Badge {
+                            text: root.summary-diff;
+                            tint: Theme.badge-diff;
+                        }
+
+                        Badge {
+                            text: root.summary-only-left;
+                            tint: Theme.badge-only-left;
+                        }
+
+                        Badge {
+                            text: root.summary-only-right;
+                            tint: Theme.badge-only-right;
+                        }
+                    }
+
+                    if root.result-has-table: DataTable {
+                        columns <=> root.result-columns;
+                        rows: root.result-rows;
+                        header-clicked(column) => {
+                            root.sort-result(column);
+                        }
+                    }
+
+                    if !root.result-has-table: Text {
+                        vertical-stretch: 1;
+                        text: root.result-hint;
+                        color: Theme.dimmed;
+                        font-italic: true;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.result-status;
+                        font-size: 11px;
+                        color: Theme.dimmed;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Popovers ---------------------------------------------------------------------
+    // The copy mirrors what `sheet-core`'s `parse_excel` / `apply_number_format` actually do,
+    // so the numbers don't look like bugs.
+    excel-notes := PopupWindow {
+        x: 12px;
+        y: 52px;
+        width: 470px;
+        height: 440px;
+        close-policy: close-on-click-outside;
+
+        Popover {
+            ScrollView {
+                x: 12px;
+                y: 12px;
+                width: parent.width - 24px;
+                height: parent.height - 24px;
+
+                VerticalLayout {
+                    width: parent.visible-width;
+                    spacing: 8px;
+
+                    Text {
+                        text: "How Excel (.xlsx / .xls) files are read";
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "Excel stores the full-precision number and a separate display format; we read the number and reapply the common formats — fixed decimals (e.g. 30.40), thousands separators, a leading currency symbol, and percent. So a 20%-off price stored as 30.400000000000002 shows as its formatted value, not the raw double.";
+                        wrap: word-wrap;
+                        font-size: 12px;
+                    }
+
+                    Text {
+                        text: "Known limitations & gotchas";
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "• Uncommon formats fall back to the plain number rounded to Excel's 15-digit precision: accounting/negative-in-parentheses, colored or conditional formats, fractions, and scientific notation aren't reproduced.\n• Trailing format text is dropped — a custom format like 0.00\" USD\" shows 30.40, not 30.40 USD.\n• Only single-sheet workbooks are supported; multi-sheet files are rejected.\n• Formulas show their last-saved value — nothing is recalculated on import.\n• Dates are normalized to ISO 8601 (yyyy-mm-ddThh:mm:ss.mmm), regardless of the sheet's date format.\n• Numbers stay numeric — a code like 00123 stored as a number loses its leading zeros unless it was stored as text in Excel. Save as CSV to preserve exact text.\n• Styling, colors, merged cells, and hidden rows/columns are ignored — values only.";
+                        wrap: word-wrap;
+                        font-size: 12px;
+                    }
+                }
+            }
+        }
+    }
+
+    // Mirrors the menu bar. Kept in the window as well so the shortcuts stay discoverable on
+    // platforms where the menu bar isn't where people look for them.
+    shortcuts := PopupWindow {
+        x: 12px;
+        y: 52px;
+        width: 470px;
+        height: 520px;
+        close-policy: close-on-click-outside;
+
+        Popover {
+            ScrollView {
+                x: 12px;
+                y: 12px;
+                width: parent.width - 24px;
+                height: parent.height - 24px;
+
+                VerticalLayout {
+                    width: parent.visible-width;
+                    spacing: 3px;
+
+                    Text {
+                        text: "Keyboard shortcuts";
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: "Ctrl is ⌘ on macOS. Alt is ⌥.";
+                        font-size: 11px;
+                        color: Theme.dimmed;
+                    }
+
+                    Rectangle { height: 6px; }
+
+                    ShortcutRow { keys: "Ctrl+O"; action: "Load into the Left panel"; }
+                    ShortcutRow { keys: "Ctrl+Shift+O"; action: "Load into the Right panel"; }
+                    ShortcutRow { keys: "Ctrl+T"; action: "Swap Left & Right"; }
+                    ShortcutRow { keys: "Ctrl+E"; action: "Export the result"; }
+
+                    Rectangle { height: 8px; }
+
+                    ShortcutRow { keys: "Ctrl+1 / Ctrl+2"; action: "Filter / Compare mode"; }
+                    ShortcutRow { keys: "Ctrl+D"; action: "Toggle Exclude / Include"; }
+                    ShortcutRow { keys: "Ctrl+I"; action: "Toggle case-insensitive matching"; }
+
+                    Rectangle { height: 8px; }
+
+                    ShortcutRow { keys: "Ctrl+] / Ctrl+["; action: "Next / previous filter or key column"; }
+                    ShortcutRow { keys: "Ctrl+} / Ctrl+{"; action: "Next / previous compare value column"; }
+                    ShortcutRow { keys: "Ctrl+Backspace"; action: "Clear the column selection"; }
+
+                    Rectangle { height: 8px; }
+
+                    ShortcutRow { keys: "Ctrl+→ / Ctrl+←"; action: "Result: sort by next / previous column"; }
+                    ShortcutRow { keys: "Ctrl+↓"; action: "Result: ascending → descending → unsorted"; }
+                    ShortcutRow { keys: "Alt+→ / Alt+←"; action: "Left panel: sort by next / previous column"; }
+                    ShortcutRow { keys: "Alt+↓"; action: "Left panel: cycle sort direction"; }
+                    ShortcutRow { keys: "Alt+Shift+→ / ←"; action: "Right panel: sort by next / previous column"; }
+                    ShortcutRow { keys: "Alt+Shift+↓"; action: "Right panel: cycle sort direction"; }
+                    ShortcutRow { keys: "Ctrl+Shift+U"; action: "Clear every sort"; }
+
+                    Rectangle { height: 8px; }
+
+                    ShortcutRow { keys: "Ctrl+K"; action: "Excel notes"; }
+                    ShortcutRow { keys: "Ctrl+/"; action: "This list"; }
+                    ShortcutRow { keys: "Esc"; action: "Dismiss the status message"; }
+                }
+            }
+        }
+    }
+}
