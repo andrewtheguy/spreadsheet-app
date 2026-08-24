@@ -106,9 +106,13 @@ pub fn truncate_path(path: &str, max_chars: usize) -> String {
     };
 
     // When the filename alone won't fit there's no room for any directory context, so truncate
-    // the filename itself rather than producing something longer than `max_chars`.
+    // the filename itself rather than producing something longer than `max_chars`. The tail is
+    // clamped to the filename's own length: this branch also catches the case where the filename
+    // is *just* short enough to fit but leaves no room for a directory, and taking `max_chars - 3`
+    // characters from it would run off the front.
     if file_name.len() + 4 >= max_chars {
-        let tail: String = file_name[file_name.len() - (max_chars - 3)..].iter().collect();
+        let tail_len = max_chars.saturating_sub(3).min(file_name.len());
+        let tail: String = file_name[file_name.len() - tail_len..].iter().collect();
         return format!("...{tail}");
     }
 
@@ -305,6 +309,25 @@ mod tests {
         let path = r"C:\Users\someone\a\very\deeply\nested\directory\tree\report.csv";
         let out = truncate_path(path, 40);
         assert!(out.ends_with(r"\report.csv"), "{out}");
+    }
+
+    #[test]
+    fn filename_lengths_around_the_boundary_dont_overflow() {
+        // At exactly `max_chars - 4` the filename takes the truncate-the-filename branch while
+        // being shorter than the `max_chars - 3` characters that branch wants to keep. Sweep the
+        // whole neighbourhood, since only one length used to underflow.
+        const MAX: usize = 40;
+        for name_len in 1..=(MAX + 8) {
+            let file_name = format!("{}.csv", "x".repeat(name_len.saturating_sub(4)));
+            let path = format!("/abcd/{file_name}");
+            let out = truncate_path(&path, MAX);
+            assert!(
+                out.chars().count() <= MAX,
+                "{out} ({} chars) exceeds {MAX} for a {}-char filename",
+                out.chars().count(),
+                file_name.chars().count()
+            );
+        }
     }
 
     #[test]

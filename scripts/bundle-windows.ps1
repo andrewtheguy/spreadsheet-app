@@ -18,7 +18,10 @@ param(
     [string] $OutDir = "target/windows",
     # Pinned so a WiX release can't silently change the installer we ship.
     [string] $WixVersion = "3.14.1",
-    [string] $WixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
+    [string] $WixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip",
+    # SHA-256 of wix314-binaries.zip, so a substituted or truncated download can't be unpacked
+    # and run as part of the installer build. Update it whenever $WixUrl changes.
+    [string] $WixSha256 = "6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +45,11 @@ if (-not (Test-Path (Join-Path $wixDir "candle.exe"))) {
     New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
     $zip = Join-Path ([System.IO.Path]::GetTempPath()) "wix-$WixVersion.zip"
     Invoke-WebRequest -UseBasicParsing -Uri $WixUrl -OutFile $zip
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash
+    if ($actual -ne $WixSha256) {
+        Remove-Item $zip -ErrorAction SilentlyContinue
+        throw "WiX download hash mismatch: expected $WixSha256, got $actual"
+    }
     Expand-Archive -Force -Path $zip -DestinationPath $wixDir
     Remove-Item $zip
 }

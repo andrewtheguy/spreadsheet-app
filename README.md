@@ -64,7 +64,7 @@ Desktop only — macOS and Windows. No mobile or Linux support.
 
 ## Architecture
 
-Three layers, each with no knowledge of the one above it:
+Four components, each with no knowledge of the one above it:
 
 - `sheet-core/` — pure Rust crate with all CSV/Excel parsing, serializing,
   filtering, comparing, and sorting logic. No UI dependencies, so it builds and
@@ -125,7 +125,9 @@ with a Start Menu shortcut, and upgrades in place. **Never change the
 rather than parallel installs.
 
 The `release` workflow runs both, uploading a `.dmg` plus a zipped `.app`, and an
-`.msi` plus a zipped `.exe`. Nothing is code-signed, so both platforms show an
+`.msi` plus a zipped `.exe`. The macOS bundle is ad-hoc signed, which is only
+enough to let it launch on Apple silicon — there's no trusted developer
+certificate on either platform and nothing is notarized, so both still show an
 unidentified-developer warning.
 
 ### Rendering fallback
