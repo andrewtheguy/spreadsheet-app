@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 # styles.xml + the sheet. Both crates are already in the tree via calamine; matching its zip
 # features avoids pulling extra compression backends.
 zip = { version = "7", default-features = false, features = ["deflate"] }
-quick-xml = "0.39"
+quick-xml = "0.41"
 
 [dev-dependencies]
 rust_xlsxwriter = "0.95.0"
