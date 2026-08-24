@@ -21,7 +21,7 @@ slint = "1.17.1"
 sheet-core = { path = "sheet-core" }
 # Standalone native file dialogs. Default features are Linux-only portal/async support, which
 # this macOS/Windows app does not need.
-rfd = { version = "0.15", default-features = false }
+rfd = { version = "0.17", default-features = false }
 # System clipboard for the Edit ▸ Copy actions; neither Slint nor rfd exposes one.
 arboard = "3.6"
 
