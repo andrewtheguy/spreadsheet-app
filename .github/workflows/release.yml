@@ -65,7 +65,7 @@ jobs:
       # different code, and these run with a token that can write releases. The trailing
       # comment is the release each SHA is, so Dependabot (.github/dependabot.yml) can
       # bump both together.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # `stable` is a branch here rather than a release tag, so this pins the action's own
       # code as of that commit. It still installs whatever the current stable Rust is —
